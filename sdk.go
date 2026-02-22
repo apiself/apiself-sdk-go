@@ -9,10 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/joho/godotenv" // Pridané pre .env
 )
 
-// APISelf Public Key - Used to verify license signatures
-// Replace this with content from your generated public.pem
+// Tvoj verejný kľúč (nechávam tvoj pôvodný)
 const publicKeyPEM = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4q73lqy18mC4fdUpo4rB
 viicDRAfKhFLJ15+m7cQ3d5qbjlDfHGHMUxFObRcVB4j+7y67BtJ3BmuAW+0GShW
@@ -29,7 +30,7 @@ type BoxConfig struct {
 	Name    string
 }
 
-// ValidateLicense checks if the license key matches the signature using RSA
+// ValidateLicense - tvoja pôvodná funkcia (bezo zmeny)
 func ValidateLicense(licenseData string, signature []byte) error {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
@@ -43,9 +44,7 @@ func ValidateLicense(licenseData string, signature []byte) error {
 	if !ok {
 		return errors.New("not an RSA public key")
 	}
-	// Create hash of the license data
 	hashed := sha256.Sum256([]byte(licenseData))
-	// Verify the signature
 	err = rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, hashed[:], signature)
 	if err != nil {
 		return errors.New("invalid license signature")
@@ -53,17 +52,21 @@ func ValidateLicense(licenseData string, signature []byte) error {
 	return nil
 }
 
-// InitBox initializes the Box and checks for license in environment variables
+// InitBox - upravená o godotenv
 func InitBox(conf BoxConfig) {
+	// 1. Automaticky skúsime načítať .env hneď na začiatku
+	_ = godotenv.Load()
+
 	fmt.Printf("🚀 APISelf: Starting %s (%s)...\n", conf.Name, conf.Version)
+
 	license := os.Getenv("APISELF_LICENSE")
 	if license == "" {
 		fmt.Println("❌ ERROR: APISELF_LICENSE environment variable is missing!")
 		return
 	}
-	// Simple check for our new format: Base64(data).Base64(signature)
-	// For this test, we just check if it contains a dot
+
 	fmt.Println("🔍 Verifying license format...")
-	// TODO: Add real ValidateLicense(data, signature) call here after parsing
+	// TODO: Tu neskôr pridáme volanie ValidateLicense po rozsekaní stringu na dáta a podpis
+
 	fmt.Println("✅ License verification module initialized.")
 }
