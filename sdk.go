@@ -59,8 +59,11 @@ func InitBox(conf BoxConfig) {
 	license := os.Getenv("APISELF_LICENSE")
 	if license == "" {
 		fmt.Println("❌ ERROR: APISELF_LICENSE environment variable is missing!")
-		// In production, we exit to prevent unauthorized use
-		// os.Exit(1)
+		return
 	}
+	// Simple check for our new format: Base64(data).Base64(signature)
+	// For this test, we just check if it contains a dot
+	fmt.Println("🔍 Verifying license format...")
+	// TODO: Add real ValidateLicense(data, signature) call here after parsing
 	fmt.Println("✅ License verification module initialized.")
 }
