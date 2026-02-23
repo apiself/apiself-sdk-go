@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/denisbrodbeck/machineid"
+	"github.com/joho/godotenv"
 )
 
 const publicKeyPEM = `-----BEGIN PUBLIC KEY-----
