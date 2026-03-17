@@ -1,20 +1,23 @@
 package sdk
 
 import (
-	"crypto"
-	"crypto/rsa"
+	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
-	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
-	"strings"
+	"os/signal"
+	"os/user"
+	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/denisbrodbeck/machineid"
-	"github.com/joho/godotenv"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const publicKeyPEM = `-----BEGIN PUBLIC KEY-----
@@ -27,91 +30,241 @@ RNDCW5+5rg+AlVvkk4pJefV0uBjJwQmebITzxzT/gW9DtSHUjUVbgke7ig2SOJ0J
 UwIDAQAB
 -----END PUBLIC KEY-----`
 
+// BoxConfig obsahuje identifikáciu boxu.
 type BoxConfig struct {
 	ID      string
-	Version string
 	Name    string
+	Version string
 }
 
-// LicensePayload obsahuje dáta zakódované v licencii
-type LicensePayload struct {
-	BoxID     string   `json:"bid"` // Box ID
-	ClusterID string   `json:"cid"` // ID Grupy (pre zdieľané licencie)
-	HWID      string   `json:"hid"` // Uzamknutie na konkrétny HW
-	ValidHW   []string `json:"vhw"` // Zoznam povolených HW v rámci Grupy
-	Owner     string   `json:"own"` // Meno zákazníka
+// LicenseClaims obsahuje RS256 JWT claims podľa APISelf v0.4.1.
+type LicenseClaims struct {
+	LicenseID string `json:"lid"` // UUID licencie
+	BoxID     string `json:"bid"` // ID boxu (napr. apiself-box-helloworld)
+	HWID         string `json:"hid"` // HWID stroja (machineid.ProtectedID)
+	Email        string `json:"eml"` // Email majiteľa
+	Plan         string `json:"pln"` // Plán: solo | team | unlimited
+	MaxInstances int    `json:"mxi"` // Max súčasných inštancií (-1 = neobmedzene)
+	jwt.RegisteredClaims
 }
 
-func ValidateLicense(licenseData string, signature []byte) error {
-	block, _ := pem.Decode([]byte(publicKeyPEM))
-	if block == nil {
-		return errors.New("failed to parse PEM block containing the public key")
+// GetHWID vráti stabilný HWID tohto stroja.
+// Primárne používa machineid.ProtectedID("apiself") — HMAC-SHA256 machine-id,
+// s fallback na SHA256(hostname:username) ak machine-id nie je dostupný.
+func GetHWID() (string, error) {
+	primary, err := machineid.ProtectedID("apiself")
+	if err == nil {
+		return primary, nil
 	}
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return err
-	}
-	rsaPub, ok := pub.(*rsa.PublicKey)
-	if !ok {
-		return errors.New("not an RSA public key")
-	}
-	hashed := sha256.Sum256([]byte(licenseData))
-	return rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, hashed[:], signature)
+	hostname, _ := os.Hostname()
+	u, _ := user.Current()
+	h := sha256.Sum256([]byte(hostname + ":" + u.Username))
+	log.Printf("APISelf: machine-id nedostupný, použitý HWID fallback")
+	return hex.EncodeToString(h[:]), nil
 }
 
-func InitBox(conf BoxConfig) {
-	_ = godotenv.Load()
-
-	// 1. Získame unikátny HWID tohto stroja
-	myHWID, _ := machineid.ID()
-
-	fmt.Printf("🚀 APISelf: Starting %s (%s)...\n", conf.Name, conf.Version)
-
-	license := os.Getenv("APISELF_LICENSE")
-	if license == "" {
-		fmt.Printf("❌ ERROR: APISELF_LICENSE missing!\n🔑 Your Hardware ID: %s\n", myHWID)
-		os.Exit(1) // Tu už dávame os.Exit, aby sa port neotvoril
-	}
-
-	// 2. Rozdelenie na Dáta a Podpis (formát: base64JSON.base64Sig)
-	parts := strings.Split(license, ".")
-	if len(parts) != 2 {
-		fmt.Println("❌ ERROR: Invalid license format!")
-		os.Exit(1)
-	}
-	// 3. Verifikácia RSA podpisu
-	decodedData, _ := base64.StdEncoding.DecodeString(parts[0])
-	signature, _ := base64.StdEncoding.DecodeString(parts[1])
-	if err := ValidateLicense(string(decodedData), signature); err != nil {
-		fmt.Printf("❌ ERROR: %v\n", err)
-		os.Exit(1)
-	}
-	// 4. Kontrola obsahu licencie (JSON)
-	var payload LicensePayload
-	if err := json.Unmarshal(decodedData, &payload); err != nil {
-		fmt.Println("❌ ERROR: Failed to parse license data!")
-		os.Exit(1)
-	}
-	// 5. NODE-LOCK & CLUSTER-CHECK
-	// Kontrolujeme, či môj HWID sedí s tým v licencii, alebo či som v zozname Grupy
-	authorized := (payload.HWID == myHWID)
-	// Ak je to skupinová licencia, skontrolujeme zoznam povolených HW
-	if !authorized && len(payload.ValidHW) > 0 {
-		for _, v := range payload.ValidHW {
-			if v == myHWID {
-				authorized = true
-				break
-			}
+// GetPort vráti port z APISELF_PORT env premennej alebo defaultPort ak nie je nastavená.
+func GetPort(defaultPort int) int {
+	if v := os.Getenv("APISELF_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			return p
 		}
 	}
-	if !authorized {
-		fmt.Printf("❌ ERROR: Hardware mismatch!\n   Machine ID: %s\n   License ID: %s\n", myHWID, payload.HWID)
+	return defaultPort
+}
+
+// GetCoreURL vráti URL Core orchestrátora z APISELF_CORE_URL alebo default localhost:7474.
+func GetCoreURL() string {
+	if v := os.Getenv("APISELF_CORE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:7474"
+}
+
+// InitBox overí RS256 JWT licenciu a zastaví box (os.Exit(1)) ak licencia nie je platná.
+// Musí byť volaná ako prvá operácia v main() — pred otvorením akéhokoľvek portu.
+// Vráti LicenseClaims pre použitie v boxe (email majiteľa, plán, atď.).
+func InitBox(conf BoxConfig) LicenseClaims {
+	myHWID, _ := GetHWID()
+
+	fmt.Printf("APISelf: Starting %s (%s)...\n", conf.Name, conf.Version)
+
+	licenseToken := os.Getenv("APISELF_LICENSE")
+	if licenseToken == "" {
+		fmt.Printf("ERROR: APISELF_LICENSE chýba!\nHardware ID: %s\n", myHWID)
 		os.Exit(1)
 	}
-	// 6. Kontrola Box ID
-	if payload.BoxID != conf.ID {
-		fmt.Printf("❌ ERROR: License is for Box '%s', but you are running '%s'\n", payload.BoxID, conf.ID)
+
+	pubKey, err := jwt.ParseRSAPublicKeyFromPEM([]byte(publicKeyPEM))
+	if err != nil {
+		fmt.Printf("ERROR: neplatný verejný kľúč: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("✅ License verified for: %s (Cluster: %s)\n", payload.Owner, payload.ClusterID)
+
+	claims := &LicenseClaims{}
+	token, err := jwt.ParseWithClaims(licenseToken, claims, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("neočakávaná podpisová metóda: %v", t.Header["alg"])
+		}
+		return pubKey, nil
+	})
+	if err != nil || !token.Valid {
+		fmt.Printf("ERROR: neplatná licencia: %v\n", err)
+		os.Exit(1)
+	}
+
+	if claims.BoxID != conf.ID {
+		fmt.Printf("ERROR: Licencia je pre box '%s', nie '%s'\n", claims.BoxID, conf.ID)
+		os.Exit(1)
+	}
+
+	if claims.HWID != myHWID {
+		fmt.Printf("ERROR: Hardware mismatch!\n  Stroj:    %s\n  Licencia: %s\n", myHWID, claims.HWID)
+		os.Exit(1)
+	}
+
+	fmt.Printf("OK: Licencia overená — %s (%s)\n", claims.Email, claims.Plan)
+
+	cloudURL := os.Getenv("APISELF_CLOUD_URL")
+	if cloudURL == "" {
+		cloudURL = "https://apiself.com"
+	}
+
+	// ── Max instances enforcement ─────────────────────────────────────────────
+	instanceID := newInstanceID()
+	if claims.MaxInstances > 0 {
+		if !registerInstance(instanceID, licenseToken, cloudURL) {
+			fmt.Printf("APISelf FATAL: Dosiahnutý limit inštancií (%d). Box sa zastaví.\n", claims.MaxInstances)
+			os.Exit(1)
+		}
+	} else {
+		// Neobmedzený plán — len zaregistruj pre evidenciu (ignorujeme chyby)
+		registerInstance(instanceID, licenseToken, cloudURL)
+	}
+
+	// ── Periodické kontroly na pozadí ────────────────────────────────────────
+	go periodicRevocationCheck(conf, licenseToken, cloudURL)
+	go instanceKeepAlive(instanceID, cloudURL)
+
+	// ── Clean-up pri graceful shutdown ────────────────────────────────────────
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		unregisterInstance(instanceID, cloudURL)
+		os.Exit(0)
+	}()
+
+	return *claims
+}
+
+// newInstanceID generuje náhodné UUID v4.
+func newInstanceID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%12x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// registerInstance zaregistruje inštanciu na Cloud serveri.
+// Vráti false ak limit bol dosiahnutý alebo server je dostupný a odmietol.
+func registerInstance(instanceID, signedToken, cloudURL string) bool {
+	body, _ := json.Marshal(map[string]string{
+		"signedToken": signedToken,
+		"instanceId":  instanceID,
+	})
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(cloudURL+"/api/license/instance/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		// Cloud nedostupný — povolíme (offline tolerancia)
+		log.Printf("APISelf: instance register zlyhal (cloud nedostupný): %v", err)
+		return true
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Allowed bool `json:"allowed"`
+		} `json:"data"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.Success {
+		// Neočakávaná odpoveď → offline tolerancia
+		return true
+	}
+	return result.Data.Allowed
+}
+
+// instanceKeepAlive pinguje Cloud server každých 30 minút.
+func instanceKeepAlive(instanceID, cloudURL string) {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		body, _ := json.Marshal(map[string]string{"instanceId": instanceID})
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post(cloudURL+"/api/license/instance/ping", "application/json", bytes.NewReader(body))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}
+}
+
+// unregisterInstance odhlási inštanciu pri čistom ukončení.
+func unregisterInstance(instanceID, cloudURL string) {
+	body, _ := json.Marshal(map[string]string{"instanceId": instanceID})
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(cloudURL+"/api/license/instance/unregister", "application/json", bytes.NewReader(body))
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+// periodicRevocationCheck každých 6 hodín skontroluje platnosť licencie na Cloud serveri.
+// Ak je licencia zrušená a Cloud dostupný → zastaví box (os.Exit(1)).
+// Ak je Cloud nedostupný → preskočí (offline tolerancia).
+func periodicRevocationCheck(conf BoxConfig, token, cloudURL string) {
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if !isCloudOnline(cloudURL) {
+			log.Printf("APISelf: Cloud nedostupný — revocation check preskočený")
+			continue
+		}
+
+		body, _ := json.Marshal(map[string]string{"signedToken": token})
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post(cloudURL+"/api/license/verify", "application/json", bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+
+		var result struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Valid bool `json:"valid"`
+			} `json:"data"`
+		}
+		json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+
+		if result.Success && !result.Data.Valid {
+			fmt.Printf("APISelf FATAL: Licencia pre '%s' bola zrušená. Box sa zastaví.\n", conf.ID)
+			os.Exit(1)
+		}
+	}
+}
+
+// isCloudOnline vráti true ak je Cloud API server dostupný.
+func isCloudOnline(cloudURL string) bool {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(cloudURL + "/api/health")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
