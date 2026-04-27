@@ -1,0 +1,61 @@
+# Canonical .gitignore pre APISelf Go service (viz docs/launch-security-checklist.md)
+# Aplikovany na: apiself-com, apiself-admin, apiself-manager, sdk/apiself-sdk-go, sdk/apiself-sdk-security
+
+# === Secrets — NIKDY nekomitnut ===
+.env
+.env.local
+.env.production
+.env.dev
+.env.*
+!.env.example
+!.env.template
+!.env.dev.example
+*.pem
+*.key
+*.p12
+keys/private.pem
+keys/*.pem
+!keys/.gitkeep
+
+# === Go build artefakty ===
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# === Databazy (SQLite local) ===
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# === Embedded React UI (build output) ===
+ui/node_modules/
+ui/dist/
+ui/.local/
+internal/ui/dist/
+
+# === Logy ===
+*.log
+logs/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Editory / IDE ===
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~

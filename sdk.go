@@ -7,13 +7,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strconv"
-	"syscall"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/denisbrodbeck/machineid"
@@ -37,14 +41,16 @@ type BoxConfig struct {
 	Version string
 }
 
-// LicenseClaims obsahuje RS256 JWT claims podľa APISelf v0.4.1.
+// LicenseClaims obsahuje RS256 JWT claims podľa APISelf v0.5.0.
 type LicenseClaims struct {
-	LicenseID string `json:"lid"` // UUID licencie
-	BoxID     string `json:"bid"` // ID boxu (napr. apiself-box-helloworld)
-	HWID         string `json:"hid"` // HWID stroja (machineid.ProtectedID)
-	Email        string `json:"eml"` // Email majiteľa
-	Plan         string `json:"pln"` // Plán: solo | team | unlimited
-	MaxInstances int    `json:"mxi"` // Max súčasných inštancií (-1 = neobmedzene)
+	LicenseID    string  `json:"lid"`           // UUID licencie
+	BoxID        string  `json:"bid"`           // ID boxu (napr. apiself-box-helloworld)
+	HWID         string  `json:"hid"`           // HWID stroja (machineid.ProtectedID)
+	Email        string  `json:"eml"`           // Email majiteľa
+	Plan         string  `json:"pln"`           // Plán: solo | team | unlimited | free | trial
+	MaxInstances int     `json:"mxi"`           // Max súčasných inštancií (-1 = neobmedzene)
+	Tier         string  `json:"tir,omitempty"` // Feature tier: basic | pro | enterprise | ""
+	PricePaid    float64 `json:"prc,omitempty"` // Cena zaplatená v USD pri kúpe (0 = free/trial)
 	jwt.RegisteredClaims
 }
 
@@ -79,83 +85,6 @@ func GetCoreURL() string {
 		return v
 	}
 	return "http://localhost:7474"
-}
-
-// InitBox overí RS256 JWT licenciu a zastaví box (os.Exit(1)) ak licencia nie je platná.
-// Musí byť volaná ako prvá operácia v main() — pred otvorením akéhokoľvek portu.
-// Vráti LicenseClaims pre použitie v boxe (email majiteľa, plán, atď.).
-func InitBox(conf BoxConfig) LicenseClaims {
-	myHWID, _ := GetHWID()
-
-	fmt.Printf("APISelf: Starting %s (%s)...\n", conf.Name, conf.Version)
-
-	licenseToken := os.Getenv("APISELF_LICENSE")
-	if licenseToken == "" {
-		fmt.Printf("ERROR: APISELF_LICENSE chýba!\nHardware ID: %s\n", myHWID)
-		os.Exit(1)
-	}
-
-	pubKey, err := jwt.ParseRSAPublicKeyFromPEM([]byte(publicKeyPEM))
-	if err != nil {
-		fmt.Printf("ERROR: neplatný verejný kľúč: %v\n", err)
-		os.Exit(1)
-	}
-
-	claims := &LicenseClaims{}
-	token, err := jwt.ParseWithClaims(licenseToken, claims, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
-			return nil, fmt.Errorf("neočakávaná podpisová metóda: %v", t.Header["alg"])
-		}
-		return pubKey, nil
-	})
-	if err != nil || !token.Valid {
-		fmt.Printf("ERROR: neplatná licencia: %v\n", err)
-		os.Exit(1)
-	}
-
-	if claims.BoxID != conf.ID {
-		fmt.Printf("ERROR: Licencia je pre box '%s', nie '%s'\n", claims.BoxID, conf.ID)
-		os.Exit(1)
-	}
-
-	if claims.HWID != myHWID {
-		fmt.Printf("ERROR: Hardware mismatch!\n  Stroj:    %s\n  Licencia: %s\n", myHWID, claims.HWID)
-		os.Exit(1)
-	}
-
-	fmt.Printf("OK: Licencia overená — %s (%s)\n", claims.Email, claims.Plan)
-
-	cloudURL := os.Getenv("APISELF_CLOUD_URL")
-	if cloudURL == "" {
-		cloudURL = "https://apiself.com"
-	}
-
-	// ── Max instances enforcement ─────────────────────────────────────────────
-	instanceID := newInstanceID()
-	if claims.MaxInstances > 0 {
-		if !registerInstance(instanceID, licenseToken, cloudURL) {
-			fmt.Printf("APISelf FATAL: Dosiahnutý limit inštancií (%d). Box sa zastaví.\n", claims.MaxInstances)
-			os.Exit(1)
-		}
-	} else {
-		// Neobmedzený plán — len zaregistruj pre evidenciu (ignorujeme chyby)
-		registerInstance(instanceID, licenseToken, cloudURL)
-	}
-
-	// ── Periodické kontroly na pozadí ────────────────────────────────────────
-	go periodicRevocationCheck(conf, licenseToken, cloudURL)
-	go instanceKeepAlive(instanceID, cloudURL)
-
-	// ── Clean-up pri graceful shutdown ────────────────────────────────────────
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		unregisterInstance(instanceID, cloudURL)
-		os.Exit(0)
-	}()
-
-	return *claims
 }
 
 // newInstanceID generuje náhodné UUID v4.
@@ -267,4 +196,214 @@ func isCloudOnline(cloudURL string) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// logRW je minimálny ResponseWriter wrapper ktorý zachytí HTTP status kód.
+type logRW struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *logRW) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *logRW) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+// isStaticAsset vráti true pre statické assety (JS/CSS/obrázky/fonty) ktoré
+// nie sú zaujímavé pre logy ani počítadlo requestov.
+func isStaticAsset(path string) bool {
+	for _, ext := range []string{".js", ".css", ".map", ".ico", ".png", ".jpg", ".jpeg", ".svg", ".woff", ".woff2", ".ttf", ".eot"} {
+		if len(path) > len(ext) && path[len(path)-len(ext):] == ext {
+			return true
+		}
+	}
+	return false
+}
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+
+// Log je globálny slog logger pre aplikačné udalosti boxu.
+// Pred volaním InitLogger smeruje na stdout s text formátom.
+// Použitie: sdk.Log.Info("bucket.created", "bucket", name)
+var Log *slog.Logger = slog.Default()
+
+var logInitOnce sync.Once
+
+// InitLogger inicializuje štruktúrovaný slog logger pre box.
+// Výstup smeruje na stdout (zachytávaný supervisorom → záložka Logs) a do
+// rotujúceho súboru logDir/app.log (pre lokálneho vývojára).
+//
+// boxID je automaticky pridaný do každého záznamu (pole "box_id").
+// Formát: JSON (default) alebo text (LOG_FORMAT=text).
+// Úroveň: Info (default), laditeľná cez LOG_LEVEL=debug|warn|error.
+//
+// Použitie:
+//
+//	sdk.InitLogger("apiself-box-mybox", "")
+//	sdk.Log.Info("item.created", "id", item.ID)
+func InitLogger(boxID, logDir string) {
+	logInitOnce.Do(func() {
+		if logDir == "" {
+			logDir = os.Getenv("APISELF_LOG_DIR")
+		}
+		if logDir == "" {
+			logDir = "./logs"
+		}
+		if err := os.MkdirAll(logDir, 0750); err != nil {
+			log.Printf("sdk: nemôžem vytvoriť log adresár %s: %v", logDir, err)
+		}
+
+		rotWriter := &rotatingWriter{
+			path:     filepath.Join(logDir, "app.log"),
+			maxBytes: 10 * 1024 * 1024,
+			keep:     3,
+		}
+
+		level := parseLogLevel(os.Getenv("LOG_LEVEL"))
+		w := io.MultiWriter(os.Stdout, rotWriter)
+		opts := &slog.HandlerOptions{Level: level}
+
+		var handler slog.Handler
+		if strings.ToLower(os.Getenv("LOG_FORMAT")) == "text" {
+			handler = slog.NewTextHandler(w, opts)
+		} else {
+			handler = slog.NewJSONHandler(w, opts)
+		}
+
+		Log = slog.New(handler).With("box_id", boxID)
+		slog.SetDefault(Log)
+	})
+}
+
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// rotatingWriter zapisuje do súboru a rotuje pri prekročení maxBytes.
+// Zachováva keep starých súborov (app.log.1, app.log.2, ...).
+type rotatingWriter struct {
+	mu       sync.Mutex
+	path     string
+	maxBytes int64
+	keep     int
+	f        *os.File
+	size     int64
+}
+
+func (rw *rotatingWriter) Write(p []byte) (int, error) {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if rw.f == nil {
+		if err := rw.openFile(); err != nil {
+			return 0, err
+		}
+	}
+	if rw.size+int64(len(p)) > rw.maxBytes {
+		rw.rotate()
+	}
+	n, err := rw.f.Write(p)
+	rw.size += int64(n)
+	return n, err
+}
+
+func (rw *rotatingWriter) openFile() error {
+	if err := os.MkdirAll(filepath.Dir(rw.path), 0750); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(rw.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
+	if err != nil {
+		return err
+	}
+	if info, _ := f.Stat(); info != nil {
+		rw.size = info.Size()
+	}
+	rw.f = f
+	return nil
+}
+
+func (rw *rotatingWriter) rotate() {
+	if rw.f != nil {
+		rw.f.Close()
+		rw.f = nil
+	}
+	for i := rw.keep - 1; i >= 1; i-- {
+		os.Rename(fmt.Sprintf("%s.%d", rw.path, i), fmt.Sprintf("%s.%d", rw.path, i+1)) //nolint:errcheck
+	}
+	os.Rename(rw.path, rw.path+".1") //nolint:errcheck
+	rw.size = 0
+	rw.openFile() //nolint:errcheck
+}
+
+// LoggingMiddleware obalí HTTP handler a každý request zaznamená v APISelf Manageri.
+//
+// Requesty prichádzajúce cez manager proxy (X-Forwarded-By: apiself-core) sú preskočené —
+// proxy ich loguje sama. Priame requesty (direct) sú odoslané na POST /api/core/log.
+// Statické assety (JS, CSS, obrázky) sú ticho preskočené — nie sú zaujímavé pre logy.
+//
+// Použitie v boxe:
+//
+//	http.ListenAndServe(addr, sdk.LoggingMiddleware(boxID, mux))
+func LoggingMiddleware(boxID string, next http.Handler) http.Handler {
+	coreURL := GetCoreURL()
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Requesty cez proxy sú už zalogované proxy vrstvou — preskočíme
+		if r.Header.Get("X-Forwarded-By") == "apiself-core" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Statické assety nelogujeme — zbytočný šum
+		if isStaticAsset(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		rec := &logRW{ResponseWriter: w, status: 0}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		elapsed := time.Since(start).Milliseconds()
+
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+
+		// Extrahuj IP adresu klienta
+		ip := r.RemoteAddr
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			ip = host
+		}
+
+		msg := fmt.Sprintf("%s %s → %d (%dms) [direct, from: %s]", r.Method, r.URL.Path, status, elapsed, ip)
+
+		go func() {
+			payload, _ := json.Marshal(map[string]string{
+				"boxId":   boxID,
+				"stream":  "request",
+				"message": msg,
+			})
+			resp, err := client.Post(coreURL+"/api/core/log", "application/json", bytes.NewReader(payload))
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	})
 }
