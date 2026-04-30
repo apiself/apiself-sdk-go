@@ -14,17 +14,19 @@ import (
 // Polia sú core fields — `Custom` mapa umožňuje box-špecifické rozšírenia
 // (napr. filedrop môže vrátiť `{"alias":"jarik"}`, recorder `{"format":"mp4"}`).
 type BoxInfo struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name"`
-	Version     string                 `json:"version"`
-	Author      string                 `json:"author,omitempty"`    // z config.json
-	Description string                 `json:"description,omitempty"`
-	Plan        string                 `json:"plan,omitempty"`      // z license JWT (pln claim)
-	Tier        string                 `json:"tier,omitempty"`      // z license JWT (tir claim) — basic/pro/enterprise
-	Email       string                 `json:"email,omitempty"`     // owner email z license
-	HWID        string                 `json:"hwid,omitempty"`      // stroj na ktorom box beží
-	Endpoints   []string               `json:"endpoints,omitempty"` // ["GET /api/health", "POST /api/links", ...]
-	Custom      map[string]interface{} `json:"custom,omitempty"`    // box-špecifické extra polia
+	ID            string                 `json:"id"`
+	Name          string                 `json:"name"`
+	Version       string                 `json:"version"`
+	Author        string                 `json:"author,omitempty"`        // z config.json
+	Description   string                 `json:"description,omitempty"`
+	Plan          string                 `json:"plan,omitempty"`          // pôvodný `pln` claim z JWT (free|trial|basic|pro)
+	Tier          string                 `json:"tier,omitempty"`          // CURRENT effective tier (free|basic|pro). Reflektuje runtime downgrade.
+	OriginalTier  string                 `json:"originalTier,omitempty"`  // tier zo zakúpeného JWT — odlíši sa od `Tier` po expirácii
+	LicenseExpired bool                  `json:"licenseExpired,omitempty"` // true ak SDK downgradoval na free
+	Email         string                 `json:"email,omitempty"`         // owner email z license
+	HWID          string                 `json:"hwid,omitempty"`          // stroj na ktorom box beží
+	Endpoints     []string               `json:"endpoints,omitempty"`     // ["GET /api/health", "POST /api/links", ...]
+	Custom        map[string]interface{} `json:"custom,omitempty"`        // box-špecifické extra polia
 }
 
 // HealthResponse je payload na `/api/health` — minimálny liveness probe.
@@ -76,7 +78,18 @@ func RegisterRequiredEndpoints(mux *http.ServeMux, infoFn func() BoxInfo) {
 	})
 
 	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
-		writeAPI(w, http.StatusOK, infoFn())
+		info := infoFn()
+		// Overlay runtime tier state so /api/info reflects post-downgrade reality
+		// (e.g. trial expired → Tier="free", OriginalTier="pro", LicenseExpired=true).
+		// Boxes can still set Tier themselves; if they do, OriginalTier preserves
+		// what they passed in — useful for showing "you were on Pro, now on Free".
+		runtime := Tier()
+		if info.Tier != "" && info.Tier != runtime {
+			info.OriginalTier = info.Tier
+		}
+		info.Tier = runtime
+		info.LicenseExpired = IsLicenseExpired()
+		writeAPI(w, http.StatusOK, info)
 	})
 }
 

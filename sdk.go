@@ -151,16 +151,21 @@ func unregisterInstance(instanceID, cloudURL string) {
 	}
 }
 
-// periodicRevocationCheck každých 6 hodín skontroluje platnosť licencie na Cloud serveri.
-// Ak je licencia zrušená a Cloud dostupný → zastaví box (os.Exit(1)).
-// Ak je Cloud nedostupný → preskočí (offline tolerancia).
-func periodicRevocationCheck(conf BoxConfig, token, cloudURL string) {
+// periodicRevocationCheck polls the cloud every 6 hours. When the cloud
+// confirms the licence is no longer valid, the runtime tier is downgraded to
+// FREE — the box keeps running with FREE-tier features instead of exiting.
+// Cloud unreachable → skip (offline tolerance).
+func periodicRevocationCheck(conf BoxConfig, token, cloudURL string, state *licenseState) {
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 
 	for range ticker.C {
+		if state.expired.Load() {
+			// Already downgraded — nothing more to verify.
+			return
+		}
 		if !isCloudOnline(cloudURL) {
-			log.Printf("APISelf: Cloud nedostupný — revocation check preskočený")
+			log.Printf("APISelf: cloud unreachable — revocation check skipped")
 			continue
 		}
 
@@ -181,8 +186,9 @@ func periodicRevocationCheck(conf BoxConfig, token, cloudURL string) {
 		resp.Body.Close()
 
 		if result.Success && !result.Data.Valid {
-			fmt.Printf("APISelf FATAL: Licencia pre '%s' bola zrušená. Box sa zastaví.\n", conf.ID)
-			os.Exit(1)
+			fmt.Printf("APISelf: licence for '%s' revoked by cloud — continuing in FREE mode.\n", conf.ID)
+			state.downgradeToFree()
+			return
 		}
 	}
 }
