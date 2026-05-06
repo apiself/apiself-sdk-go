@@ -83,8 +83,17 @@ func InitBox(conf BoxConfig) LicenseClaims {
 
 	initialTier := claims.Tier
 	if initialTier == "" {
-		// Legacy free / trial tokens with no tir claim — treat as free.
-		initialTier = "free"
+		// Trial JWT vystavený starou cloud verziou (alebo lokálnym manager-om)
+		// nemá `tir` claim. Trial = grace period na vyskúšanie produktu —
+		// dáme Pro tier počas trvania, trial expiry watchdog ho potom
+		// downgraduje na free pri vyprseni `exp`. Bez tohto fix-u tier-gated
+		// boxy (napr. apiself-box-storage) blokujú trial userov ako keby
+		// boli na free pláne — confusing a podráždi prvých zákazníkov.
+		if claims.Plan == "trial" {
+			initialTier = "pro"
+		} else {
+			initialTier = "free"
+		}
 	}
 	state := setGlobalTier(initialTier)
 
