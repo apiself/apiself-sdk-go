@@ -138,3 +138,48 @@ func IsMultiUser() bool {
 func AuthBoxURL() string {
 	return os.Getenv("APISELF_AUTH_BOX_URL")
 }
+
+// IsManagerProxied vráti true ak request prišiel cez Manager proxy
+// (X-Forwarded-By=apiself-core hlavička, ktorú Manager bezpečne nastavuje
+// po stripnutí všetkých client-supplied X-* hlavičiek).
+//
+// Direct-port access (napr. cez localhost:7610) NEMÁ túto hlavičku —
+// nikto okrem Manager-a ju nemôže nahodiť.
+func IsManagerProxied(r *http.Request) bool {
+	return r.Header.Get("X-Forwarded-By") == "apiself-core"
+}
+
+// RequireManagerProxy je HTTP middleware ktorý zamietne request s 401 ak
+// nepricel cez Manager proxy. Použi ho v multi-user mode-e ako defense-in-depth
+// proti direct-port-access bypass-u.
+//
+// V single-user mode (žiadny auth box detekovaný Manager-om) middleware
+// pass-throughne — direct access je vtedy povolený, lebo placeholder
+// owner má rovnaké práva ako Manager session.
+//
+// Použitie:
+//
+//	mux.Handle("/api/admin/", sdk.RequireManagerProxy(http.HandlerFunc(h.AdminHandler)))
+//
+// Alebo jednoduchšie cez wrapper-r:
+//
+//	apiMux := http.NewServeMux()
+//	apiMux.HandleFunc("/api/forms", h.ListForms)
+//	mux.Handle("/api/forms", sdk.RequireManagerProxy(apiMux))
+func RequireManagerProxy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Single-user mode (žiadny auth box) → pass-through. Phase 1 mandatory
+		// password gating Manager-a chráni pred unauthorized install / config.
+		if !IsMultiUser() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !IsManagerProxied(r) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"success":false,"error":"This box must be accessed through APISelf Manager. Direct port access is blocked in multi-user mode.","code":"auth.proxy_required"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

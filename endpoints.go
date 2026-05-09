@@ -26,6 +26,7 @@ type BoxInfo struct {
 	Email         string                 `json:"email,omitempty"`         // owner email z license
 	HWID          string                 `json:"hwid,omitempty"`          // stroj na ktorom box beží
 	Endpoints     []string               `json:"endpoints,omitempty"`     // ["GET /api/health", "POST /api/links", ...]
+	MultiUser     bool                   `json:"multiUser"`               // Phase 2: true ak APISELF_AUTH_BOX_URL je nastavené (auth box detekoval Manager)
 	Custom        map[string]interface{} `json:"custom,omitempty"`        // box-špecifické extra polia
 }
 
@@ -89,6 +90,10 @@ func RegisterRequiredEndpoints(mux *http.ServeMux, infoFn func() BoxInfo) {
 		}
 		info.Tier = runtime
 		info.LicenseExpired = IsLicenseExpired()
+		// Phase 2: signal multi-user mode k frontend-u — SDK UI useCurrentUser
+		// na to spolieha pri direct-port access detekcii. Ak Manager pri starte
+		// boxu nastavil APISELF_AUTH_BOX_URL, sme v multi-user móde.
+		info.MultiUser = IsMultiUser()
 		writeAPI(w, http.StatusOK, info)
 	})
 }
