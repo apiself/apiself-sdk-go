@@ -13,20 +13,27 @@ import (
 )
 
 // InitBox bootstraps the box: verifies the RS256 JWT licence, registers the
-// instance with the cloud, starts background watchdogs. It always returns
-// usable LicenseClaims — even when no valid licence is present, in which case
-// the box runs in FREE tier mode (graceful fallback, no os.Exit).
+// instance with the cloud, starts background watchdogs. It returns usable
+// LicenseClaims after a successful start. Strict licensing (since 2026-05):
+// when APISELF_LICENSE is missing, the box exits — no graceful fallback to
+// FREE mode without a JWT, because that allowed copied binaries to run any-
+// where without HWID binding.
 //
 // Behaviour:
 //
-//   - APISELF_LICENSE missing       → FREE mode (warn + return free claims)
-//   - JWT signature invalid         → FREE mode
-//   - JWT expired (ExpiresAt past)  → FREE mode
+//   - APISELF_LICENSE missing       → exit 1 (strict; dev bypass via -tags dev)
+//   - JWT signature invalid         → FREE mode (graceful, possible corruption)
+//   - JWT expired (ExpiresAt past)  → FREE mode (selling point: never lose data)
 //   - BoxID mismatch                → exit 1 (config bug, must be fixed)
-//   - HWID mismatch                 → exit 1 (security boundary)
+//   - HWID mismatch                 → exit 1 (security boundary, copied JWT)
 //   - max_instances limit reached   → FREE mode (degrade, don't exit)
 //   - cloud-confirmed revocation    → runtime downgrade to FREE
 //   - trial ExpiresAt reaches now   → runtime downgrade to FREE
+//
+// Dev bypass: builds compiled with `-tags dev` look at allowDevBypass = true
+// (devtag_on.go); env var APISELF_DEV_LOCAL=1 then re-enables the legacy free
+// fallback. Released binaries are compiled WITHOUT -tags dev → bypass code is
+// dead-code at compile time, no env var can revive it.
 //
 // After return, boxes should gate features via sdk.HasTier("pro") rather than
 // reading the returned LicenseClaims.Tier field — that field is the original
@@ -38,9 +45,27 @@ func InitBox(conf BoxConfig) LicenseClaims {
 
 	licenseToken := os.Getenv("APISELF_LICENSE")
 	if licenseToken == "" {
-		fmt.Printf("APISelf: APISELF_LICENSE not set — running in FREE mode.\n  Hardware ID: %s\n", myHWID)
-		setGlobalTier("free")
-		return LicenseClaims{Plan: "free", Tier: "free", HWID: myHWID, BoxID: conf.ID}
+		// Dev bypass: only present in -tags dev builds. allowDevBypass je
+		// false v released binárkach (devtag_off.go), takže celý tento
+		// blok je dead-code mimo dev build-ov.
+		if allowDevBypass && os.Getenv("APISELF_DEV_LOCAL") == "1" {
+			fmt.Printf("APISelf: APISELF_LICENSE not set — DEV BYPASS active (compiled with -tags dev).\n  Hardware ID: %s\n", myHWID)
+			setGlobalTier("free")
+			return LicenseClaims{Plan: "free", Tier: "free", HWID: myHWID, BoxID: conf.ID}
+		}
+		// Strict licensing: missing JWT znamená že box bol spustený mimo
+		// Manager-a (typicky: skopírovaná binárka na inom stroji). Manager
+		// generuje FREE JWT silently pri install / startup, takže legitimate
+		// path nikdy nedosiahne túto vetvu.
+		fmt.Fprintf(os.Stderr,
+			"ERROR: APISELF_LICENSE not set.\n"+
+				"  This box must be installed via APISelf Manager (free license\n"+
+				"  is auto-generated at install). For air-gap / headless setups\n"+
+				"  visit https://apiself.com/free-license to get a HWID-bound\n"+
+				"  free license offline.\n\n"+
+				"  Hardware ID: %s\n  Box ID:      %s\n",
+			myHWID, conf.ID)
+		os.Exit(1)
 	}
 
 	pubKey, err := jwt.ParseRSAPublicKeyFromPEM([]byte(publicKeyPEM))
