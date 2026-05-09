@@ -3,6 +3,7 @@
 package sdk
 
 import (
+	"crypto/rsa"
 	"fmt"
 	"os"
 	"os/signal"
@@ -68,11 +69,24 @@ func InitBox(conf BoxConfig) LicenseClaims {
 		os.Exit(1)
 	}
 
-	pubKey, err := jwt.ParseRSAPublicKeyFromPEM([]byte(publicKeyPEM))
+	cloudPubKey, err := jwt.ParseRSAPublicKeyFromPEM([]byte(publicKeyPEM))
 	if err != nil {
 		fmt.Printf("APISelf: invalid embedded public key (%v) — running in FREE mode.\n", err)
 		setGlobalTier("free")
 		return LicenseClaims{Plan: "free", Tier: "free", HWID: myHWID, BoxID: conf.ID}
+	}
+
+	// APISELF_MANAGER_PUBKEY env var je nastavený Manager-om (sdk-manager security
+	// pass v0.21+). Slúži na validáciu lokálne-vystavených free JWT-ov keď cloud
+	// nie je dostupný — Manager generuje keypair pri prvom štarte, sign-uje free
+	// JWT-y s ním, SDK validuje s týmto pubkey-om iba ak claim `iss` ==
+	// "apiself-manager-local". Pre paid tiery (basic/pro) sa stále vyžaduje
+	// apiself.com cloud-signed JWT — Manager nemôže promote-núť tier.
+	var managerPubKey *rsa.PublicKey
+	if mgrPEM := os.Getenv("APISELF_MANAGER_PUBKEY"); mgrPEM != "" {
+		if k, perr := jwt.ParseRSAPublicKeyFromPEM([]byte(mgrPEM)); perr == nil {
+			managerPubKey = k
+		}
 	}
 
 	claims := &LicenseClaims{}
@@ -80,12 +94,35 @@ func InitBox(conf BoxConfig) LicenseClaims {
 		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
-		return pubKey, nil
+		// Vyber správny pubkey podľa `iss` claim-u.
+		// "apiself-manager-local" → Manager pubkey (free tier only)
+		// inak (vrátane prázdneho)  → cloud apiself.com pubkey
+		if iss, _ := t.Claims.GetIssuer(); iss == "apiself-manager-local" {
+			if managerPubKey == nil {
+				return nil, fmt.Errorf("manager-issued JWT but APISELF_MANAGER_PUBKEY not set")
+			}
+			return managerPubKey, nil
+		}
+		return cloudPubKey, nil
 	})
 	if err != nil || !token.Valid {
 		fmt.Printf("APISelf: licence invalid or expired (%v) — running in FREE mode.\n", err)
 		setGlobalTier("free")
 		return LicenseClaims{Plan: "free", Tier: "free", HWID: myHWID, BoxID: conf.ID}
+	}
+
+	// Security boundary: Manager-issued JWT-y MOZU byt iba free tier. Adversarial
+	// Manager by inak mohol promote-núť ľubovoľný box na Pro/Enterprise bez platby.
+	// Cloud-signed JWT-y (issuer = apiself.com alebo prázdne) môžu mať akýkoľvek tier.
+	if iss, _ := token.Claims.GetIssuer(); iss == "apiself-manager-local" {
+		if claims.Tier != "" && claims.Tier != "free" {
+			fmt.Printf("ERROR: Manager-issued JWT cannot have tier=%q (only 'free' allowed). Refusing.\n", claims.Tier)
+			os.Exit(1)
+		}
+		if claims.Plan != "" && claims.Plan != "free" {
+			fmt.Printf("ERROR: Manager-issued JWT cannot have plan=%q (only 'free' allowed). Refusing.\n", claims.Plan)
+			os.Exit(1)
+		}
 	}
 
 	if claims.BoxID != conf.ID {
