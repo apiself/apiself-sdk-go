@@ -39,30 +39,50 @@ import (
 	"strings"
 )
 
-const crossBoxProxyPrefix = "/api/cb/proxy/box-"
+const (
+	crossBoxProxyBoxPrefix     = "/api/cb/proxy/box-"
+	crossBoxProxyManagerPrefix = "/api/cb/proxy/manager/"
+)
 
 // RegisterCrossBoxProxy installs the proxy route on the given mux.
-// Every path under `/api/cb/proxy/box-<slug>/...` is forwarded to
-// `<core-url>/box-<slug>/...`. The forward preserves method, body,
-// query string, request headers (except hop-by-hop and Authorization),
-// response status, response body, and response headers (except
-// hop-by-hop).
+// TWO upstream targets are supported:
 //
-// Authorization is intentionally stripped from outbound requests
-// because Manager replaces it with its own caller identification —
-// callers passing through Authorization could otherwise impersonate
-// a different box.
+//  1. /api/cb/proxy/box-{slug}/<rest>  →  <core-url>/box-{slug}/<rest>
+//     — for calling OTHER boxes through their manager-proxied API.
+//
+//  2. /api/cb/proxy/manager/<rest>     →  <core-url>/<rest>
+//     — for calling MANAGER ROOT endpoints (e.g.
+//     /api/boxes/{id}/availability used by useBoxAvailable). Without
+//     this passthrough the box's UI would have to fetch the manager
+//     directly with managerBase(), which is cross-origin when the UI
+//     is opened on the box's direct port and depends on Manager
+//     emitting the right CORS headers.
+//
+// The forward preserves method, body, query string, request headers
+// (except hop-by-hop and Authorization), response status, body and
+// response headers (except hop-by-hop).
+//
+// Authorization is stripped from outbound requests because Manager
+// identifies callers by source port, not by client-supplied tokens —
+// forwarding a stale or forged Authorization could let one box
+// impersonate another.
 func RegisterCrossBoxProxy(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cb/proxy/", crossBoxProxyHandler)
 }
 
 func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
-	// Path must look like /api/cb/proxy/box-<slug>/<rest>
-	if !strings.HasPrefix(r.URL.Path, crossBoxProxyPrefix) {
+	var tail string
+	switch {
+	case strings.HasPrefix(r.URL.Path, crossBoxProxyBoxPrefix):
+		// /api/cb/proxy/box-<slug>/<rest>  →  /box-<slug>/<rest>
+		tail = strings.TrimPrefix(r.URL.Path, "/api/cb/proxy")
+	case strings.HasPrefix(r.URL.Path, crossBoxProxyManagerPrefix):
+		// /api/cb/proxy/manager/<rest>  →  /<rest>
+		tail = "/" + strings.TrimPrefix(r.URL.Path, crossBoxProxyManagerPrefix)
+	default:
 		http.NotFound(w, r)
 		return
 	}
-	tail := strings.TrimPrefix(r.URL.Path, "/api/cb/proxy") // /box-<slug>/<rest>
 	upstream := strings.TrimRight(GetCoreURL(), "/") + tail
 	if r.URL.RawQuery != "" {
 		upstream += "?" + r.URL.RawQuery
