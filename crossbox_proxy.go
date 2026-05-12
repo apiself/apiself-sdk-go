@@ -36,6 +36,7 @@ package sdk
 import (
 	"io"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -101,6 +102,19 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	req.ContentLength = r.ContentLength
 	copyRequestHeaders(req.Header, r.Header)
 	req.Header.Del("Authorization") // never forward; Manager injects identity
+	// Inter-box auth — boxes that gate their /api/cb/* endpoints (e.g.
+	// Storage's CrossBoxSave, Notify's CrossBoxSend) check the
+	// X-APISELF-Box-Token header against their own APISELF_SESSION_TOKEN
+	// env var. The Manager hands every box the same token via
+	// os.Environ() inheritance, so we inject it here so callee boxes
+	// can verify the request originated inside the trusted Manager
+	// process tree. Without this the proxy returns the callee's 401
+	// in dev mode (where the env var is set). In production where the
+	// var is unset, the header is empty and the callee's check is a
+	// no-op.
+	if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
+		req.Header.Set("X-APISELF-Box-Token", tok)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
