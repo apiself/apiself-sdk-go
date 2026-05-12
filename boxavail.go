@@ -18,9 +18,25 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
+
+// applyManagerAuth sets the manager session-token header from the env
+// var the manager injects into every box's process. Manager's auth
+// middleware accepts requests with `X-APISelf-Token == local_session_token`
+// (see apiself-manager/internal/api/auth.go). In dev mode the env var
+// is set (dev.ps1 -> APISELF_SESSION_TOKEN=devtoken) and the same value
+// becomes the DB's local_session_token, so the box-side header matches.
+// In production the var is unset and manager has no password set, so
+// requests pass through without this header anyway — making this a
+// no-op rather than a regression.
+func applyManagerAuth(req *http.Request) {
+	if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
+		req.Header.Set("X-APISelf-Token", tok)
+	}
+}
 
 // BoxAvailability mirrors apiself-manager/internal/types.BoxAvailability.
 // Kept verbatim so this file compiles without importing the manager
@@ -61,6 +77,7 @@ func IsBoxAvailable(ctx context.Context, boxID, since string, timeout time.Durat
 	if err != nil {
 		return nil, err
 	}
+	applyManagerAuth(req)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -130,6 +147,19 @@ func CallBox(ctx context.Context, boxID, method, path string, body io.Reader, co
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	// Manager auth — when bound to anything other than loopback or set up
+	// with a password (i.e. production single-user installs), the
+	// /box-{slug}/* proxy rejects requests without X-APISelf-Token. Box
+	// processes inherit the same APISELF_SESSION_TOKEN value the manager
+	// stored as local_session_token, so applying it here lets box→box
+	// CallBox traffic pass through that gate.
+	applyManagerAuth(req)
+	// Also forward the box-token header so the CALLEE box's own
+	// authCrossBox check (if it has one) accepts the request without a
+	// second config step. Both headers carry the same env value.
+	if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
+		req.Header.Set("X-APISELF-Box-Token", tok)
 	}
 	// The manager appends X-APISelf-Caller automatically when this request
 	// is proxied through it. We don't set it here — the callee should not

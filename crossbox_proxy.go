@@ -114,6 +114,13 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	// no-op.
 	if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
 		req.Header.Set("X-APISELF-Box-Token", tok)
+		// X-APISelf-Token — manager's own auth middleware checks this
+		// against local_session_token in the manager DB. Required when
+		// the proxy target is /api/cb/proxy/manager/* (manager-root
+		// passthrough) and the manager has a password set; also harmless
+		// on box-target forwards because Manager strips it before
+		// reaching the callee box.
+		req.Header.Set("X-APISelf-Token", tok)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
