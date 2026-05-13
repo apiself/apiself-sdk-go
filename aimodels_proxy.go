@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 )
 
 // RegisterAIModelProxy mounts /api/ai-models/* and /api/ai-models/manifests/*
@@ -40,11 +41,21 @@ func RegisterAIModelProxy(mux *http.ServeMux) {
 	proxy.Director = func(req *http.Request) {
 		defaultDirector(req)
 		req.Host = target.Host
-		// Drop any cookies / auth headers the browser carries — manager
-		// trusts loopback origin without auth, and forwarding stale tokens
-		// could break redirect flows.
+		// Drop browser-supplied auth before injecting our own server-side
+		// identity — prevents stale cookies from leaking onto the manager
+		// redirect flow.
 		req.Header.Del("Cookie")
 		req.Header.Del("Authorization")
+		// Manager auth middleware (apiself-manager/internal/api/auth.go)
+		// gates every /api/* request when a password is set — including
+		// /api/ai-models/*. The session token lives in our env (manager
+		// exports APISELF_SESSION_TOKEN to every box it spawns), so we
+		// inject it as X-APISelf-Token so the proxied request passes
+		// the gate. Without this every model-list / manifest fetch
+		// returns 401 and the AIModelPicker shows "Unauthorized".
+		if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
+			req.Header.Set("X-APISelf-Token", tok)
+		}
 		// Path stays /api/ai-models/... — the manager mounts the same
 		// prefix, so no rewrite is needed.
 	}
