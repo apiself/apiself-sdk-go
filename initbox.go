@@ -49,6 +49,15 @@ func InitBox(conf BoxConfig) LicenseClaims {
 	// V0.7+: GetUser používa lokálnu JWT validáciu v direct-port mode.
 	SetAuthBoxID(conf.ID)
 
+	// V0.8+: box owns its auth config. Manager pri spustení injektuje
+	// env vars APISELF_AUTH_REQUIRED, APISELF_AUTH_BOX_URL,
+	// APISELF_AUTH_REGISTRATION. Box si ich kešuje v box.db aby vedel
+	// svoj stav aj keby manager spadol. Volanie je best-effort — chyba
+	// pri write iba zaloguje warn, runtime cache je aj tak naplnená z env.
+	if err := SyncAuthConfigFromEnv(conf.ID); err != nil {
+		Log.Warn("sdk.auth_config_sync_failed", "error", err.Error())
+	}
+
 	licenseToken := os.Getenv("APISELF_LICENSE")
 	if licenseToken == "" {
 		// Dev bypass: only present in -tags dev builds. allowDevBypass je

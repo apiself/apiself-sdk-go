@@ -27,7 +27,22 @@ type BoxInfo struct {
 	HWID          string                 `json:"hwid,omitempty"`          // stroj na ktorom box beží
 	Endpoints     []string               `json:"endpoints,omitempty"`     // ["GET /api/health", "POST /api/links", ...]
 	MultiUser     bool                   `json:"multiUser"`               // Phase 2: true ak APISELF_AUTH_BOX_URL je nastavené (auth box detekoval Manager)
+	Auth          *AuthInfoPublic        `json:"auth,omitempty"`          // v0.8: auth config (required + box URL + registration mode)
 	Custom        map[string]interface{} `json:"custom,omitempty"`        // box-špecifické extra polia
+}
+
+// AuthInfoPublic je verejne exportovateľný subset AuthConfig.
+// Vracia ho /api/info aby si frontend nemusel ťahať z manager-a.
+// Privátne polia (LastSyncedAt, secrets) sa tu nevracajú.
+type AuthInfoPublic struct {
+	// Required — či tento box vyžaduje prihlásenie. Default false.
+	Required bool `json:"required"`
+	// BoxURL — URL na auth box (z APISELF_AUTH_BOX_URL env). Frontend
+	// ho použije pre POST na /api/auth/login.
+	BoxURL string `json:"box_url,omitempty"`
+	// RegistrationMode — closed | open | approval | email_verify.
+	// LoginForm podľa toho zobrazí Sign-up tab alebo nie.
+	RegistrationMode string `json:"registration_mode,omitempty"`
 }
 
 // HealthResponse je payload na `/api/health` — minimálny liveness probe.
@@ -94,6 +109,18 @@ func RegisterRequiredEndpoints(mux *http.ServeMux, infoFn func() BoxInfo) {
 		// na to spolieha pri direct-port access detekcii. Ak Manager pri starte
 		// boxu nastavil APISELF_AUTH_BOX_URL, sme v multi-user móde.
 		info.MultiUser = IsMultiUser()
+		// v0.8: auth config — frontend pôvodne pýtal manager pre per-box
+		// `auth_required` toggle. Teraz box vlastní svoju kópiu cez
+		// SyncAuthConfigFromEnv (volá sa v InitBox). Frontend ho dostane
+		// priamo z /api/info, žiadny manager round-trip nepotrebuje.
+		if info.Auth == nil {
+			ac := GetAuthConfig()
+			info.Auth = &AuthInfoPublic{
+				Required:         ac.Required,
+				BoxURL:           ac.BoxURL,
+				RegistrationMode: ac.RegistrationMode,
+			}
+		}
 		writeAPI(w, http.StatusOK, info)
 	})
 }
