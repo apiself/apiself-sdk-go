@@ -44,6 +44,11 @@ func InitBox(conf BoxConfig) LicenseClaims {
 
 	fmt.Printf("APISelf: Starting %s (%s)...\n", conf.Name, conf.Version)
 
+	// Auth box pubkey cache je per-box (na disku v BoxDataDir). Registruj
+	// hostiteľský box ID hneď, aby ValidateJWT vedel kam cachovať pubkey.
+	// V0.7+: GetUser používa lokálnu JWT validáciu v direct-port mode.
+	SetAuthBoxID(conf.ID)
+
 	licenseToken := os.Getenv("APISELF_LICENSE")
 	if licenseToken == "" {
 		// Dev bypass: only present in -tags dev builds. allowDevBypass je

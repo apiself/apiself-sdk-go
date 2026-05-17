@@ -43,7 +43,27 @@ type User struct {
 	Authenticated bool
 }
 
-// GetUser extrahuje user-a z hlavičiek injektovaných Manager proxy.
+// authBoxID je ID hostiteľského boxu pre účely auth pubkey cache.
+// Nastavuje sa cez SetAuthBoxID() pri InitBox(); pre testy a edge cases má
+// rozumný default ("apiself-box-unknown") aby ValidateJWT nepadalo na panic.
+var authBoxID = "apiself-box-unknown"
+
+// SetAuthBoxID registruje hostiteľský box ID pre auth pubkey cache.
+// InitBox to volá automaticky; box code ho explicitne volať nepotrebuje.
+func SetAuthBoxID(id string) {
+	if id != "" {
+		authBoxID = id
+	}
+}
+
+// GetUser extrahuje user-a v tomto poradí:
+//
+//  1. Manager-proxied request (X-Forwarded-By: apiself-core) → trust headers.
+//     Toto je rýchla cesta — manager už validoval cookie a injektol hlavičky,
+//     žiadny dôvod robiť to znova.
+//  2. Inak (direct-port access) → extract JWT z cookie alebo Authorization
+//     header a validuj lokálne pomocou cached auth-box pubkey-u.
+//  3. Bez tokenu / invalid token → User{Authenticated: false}.
 //
 // Box code typicky používa:
 //
@@ -54,20 +74,34 @@ type User struct {
 //	row.OwnerID = user.ID  // tag DB row's owner
 //
 // Pre kontroly typu "stačí member alebo vyšší" preferuj sdk.HasRole(r, "member").
-//
-// Bezpečnosť: tieto hlavičky stripuje Manager proxy z client requestov
-// pred ich prepisom (pozri internal/proxy/proxy.go) — box im môže veriť
-// keďže jediná cesta dovnútra je cez Manager.
 func GetUser(r *http.Request) User {
-	id := r.Header.Get("X-APISelf-User")
-	return User{
-		ID:            id,
-		Email:         r.Header.Get("X-APISelf-Email"),
-		Role:          r.Header.Get("X-APISelf-Tier"),
-		IsAdmin:       r.Header.Get("X-APISelf-Admin") == "1",
-		IsOwner:       id == "owner" || r.Header.Get("X-APISelf-Owner") == "1",
-		Authenticated: id != "",
+	// Cesta 1 — manager-proxied. X-Forwarded-By je nastavená iba managerom
+	// po stripnutí všetkých client-supplied X-APISelf-* hlavičiek, takže
+	// im môžeme veriť. Bez tejto hlavičky by sa dali zaspoofiť.
+	if r.Header.Get("X-Forwarded-By") == "apiself-core" {
+		id := r.Header.Get("X-APISelf-User")
+		return User{
+			ID:            id,
+			Email:         r.Header.Get("X-APISelf-Email"),
+			Role:          r.Header.Get("X-APISelf-Tier"),
+			IsAdmin:       r.Header.Get("X-APISelf-Admin") == "1",
+			IsOwner:       id == "owner" || r.Header.Get("X-APISelf-Owner") == "1",
+			Authenticated: id != "",
+		}
 	}
+
+	// Cesta 2 — direct port. Extract token z cookie / Authorization header
+	// a validuj cez cached pubkey. Funguje aj keď manager nebeží — box je
+	// sebestačný.
+	token := extractToken(r)
+	if token == "" {
+		return User{Authenticated: false}
+	}
+	claims, err := ValidateJWT(authBoxID, token)
+	if err != nil || claims == nil {
+		return User{Authenticated: false}
+	}
+	return userFromClaims(claims)
 }
 
 // roleRank mapuje rolu na číselnú hodnotu pre porovnávanie.
@@ -149,37 +183,46 @@ func IsManagerProxied(r *http.Request) bool {
 	return r.Header.Get("X-Forwarded-By") == "apiself-core"
 }
 
-// RequireManagerProxy je HTTP middleware ktorý zamietne request s 401 ak
-// nepricel cez Manager proxy. Použi ho v multi-user mode-e ako defense-in-depth
-// proti direct-port-access bypass-u.
+// RequireAuth je HTTP middleware ktorý vráti 401 ak request nie je
+// autentifikovaný. Akceptuje OBE cesty (v0.7):
 //
-// V single-user mode (žiadny auth box detekovaný Manager-om) middleware
-// pass-throughne — direct access je vtedy povolený, lebo placeholder
-// owner má rovnaké práva ako Manager session.
+//   - Manager-proxied request s X-APISelf-User hlavičkou
+//   - Direct-port request s validným cookie / Authorization Bearer JWT
+//
+// V single-user mode (auth box nebeží alebo nie je nainštalovaný)
+// middleware pass-throughne — placeholder owner je vždy "prihlásený".
 //
 // Použitie:
 //
-//	mux.Handle("/api/admin/", sdk.RequireManagerProxy(http.HandlerFunc(h.AdminHandler)))
-//
-// Alebo jednoduchšie cez wrapper-r:
-//
-//	apiMux := http.NewServeMux()
-//	apiMux.HandleFunc("/api/forms", h.ListForms)
-//	mux.Handle("/api/forms", sdk.RequireManagerProxy(apiMux))
-func RequireManagerProxy(next http.Handler) http.Handler {
+//	mux.Handle("/api/admin/", sdk.RequireAuth(http.HandlerFunc(h.AdminHandler)))
+func RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Single-user mode (žiadny auth box) → pass-through. Phase 1 mandatory
-		// password gating Manager-a chráni pred unauthorized install / config.
+		// Single-user mode → pass-through. APISELF_AUTH_BOX_URL chýba
+		// znamená že auth box nikdy nebol detekovaný managerom.
 		if !IsMultiUser() {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !IsManagerProxied(r) {
+		u := GetUser(r)
+		if !u.Authenticated {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"success":false,"error":"This box must be accessed through APISelf Manager. Direct port access is blocked in multi-user mode.","code":"auth.proxy_required"}`))
+			_, _ = w.Write([]byte(`{"success":false,"error":"authentication required","code":"auth.required"}`))
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// RequireManagerProxy je deprecated alias na RequireAuth. Ponechané pre
+// backward compat boxov ktoré ho používali pred v0.7. Nové boxy nech
+// volajú RequireAuth priamo.
+//
+// Pôvodné správanie (tvrdo blokovať direct port v multi-user mode) bolo v0.7
+// uvoľnené: box vie teraz validovať JWT sám, takže direct port je legitímna
+// cesta pokým má valid token.
+//
+// Deprecated: použi RequireAuth.
+func RequireManagerProxy(next http.Handler) http.Handler {
+	return RequireAuth(next)
 }
