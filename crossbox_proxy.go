@@ -102,6 +102,19 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	req.ContentLength = r.ContentLength
 	copyRequestHeaders(req.Header, r.Header)
 	req.Header.Del("Authorization") // never forward; Manager injects identity
+	// Strip reverse-proxy-only headers. Caddy/nginx infront of the Manager
+	// set these so the FIRST hop (user → Manager) is correctly classified as
+	// Remote. But this SECOND hop (box → Manager loopback) is genuinely a
+	// localhost call — if we propagate the headers, Manager.detectSourceType
+	// honours them and labels the inner call as Remote too. With Remote off
+	// in the default access policy, the cross-box call gets 403 even though
+	// every IO happened on 127.0.0.1. 2026-05-28 user reported breaks
+	// useBoxMaturity, useBoxAvailable and any other manager-root proxy hop.
+	req.Header.Del("X-Forwarded-For")
+	req.Header.Del("X-Forwarded-Host")
+	req.Header.Del("X-Forwarded-Proto")
+	req.Header.Del("X-Real-IP")
+	req.Header.Del("Forwarded")
 	// Inter-box auth — boxes that gate their /api/cb/* endpoints (e.g.
 	// Storage's CrossBoxSave, Notify's CrossBoxSend) check the
 	// X-APISELF-Box-Token header against their own APISELF_SESSION_TOKEN
