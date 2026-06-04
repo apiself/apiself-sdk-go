@@ -1,7 +1,7 @@
 # Canonical .gitignore pre APISelf Go service (viz docs/launch-security-checklist.md)
 # Aplikovany na: apiself-com, apiself-admin, apiself-manager, sdk/apiself-sdk-go, sdk/apiself-sdk-security
 
-# === Secrets — NIKDY nekomitnut ===
+# === Secrets - NIKDY nekomitnut ===
 .env
 .env.local
 .env.production
