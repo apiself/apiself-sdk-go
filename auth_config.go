@@ -14,25 +14,25 @@ import (
 //
 // V0.8 zmena oproti v0.7: per-box `auth_required` toggle bol predtým
 // v manager.db a frontend ho musel pýtať managera. Teraz box vlastní
-// svoju kópiu — single-source-of-truth ostáva manager, ale cache je
+// svoju kópiu - single-source-of-truth ostáva manager, ale cache je
 // lokálna v `{BoxDataDir}/auth_config.json`.
 //
 // JSON file je zvolený namiesto SQLite tabuľky aby SDK nemuselo
-// importovať sqlite3 driver — boxy ho síce používajú, ale SDK má byť
+// importovať sqlite3 driver - boxy ho síce používajú, ale SDK má byť
 // driver-agnostic. 4 polia v JSON-e nestoja za to ťahať CGO dependency.
 type AuthConfig struct {
-	// Required — či tento konkrétny box vyžaduje prihlásenie. Default false.
+	// Required - či tento konkrétny box vyžaduje prihlásenie. Default false.
 	Required bool `json:"required"`
 
-	// BoxURL — URL auth boxu (z env APISELF_AUTH_BOX_URL). Empty ak auth
+	// BoxURL - URL auth boxu (z env APISELF_AUTH_BOX_URL). Empty ak auth
 	// box nie je nainštalovaný.
 	BoxURL string `json:"box_url,omitempty"`
 
-	// RegistrationMode — closed | open | approval | email_verify. Default
+	// RegistrationMode - closed | open | approval | email_verify. Default
 	// "closed" (invitation-only). Frontend to číta cez /api/info.
 	RegistrationMode string `json:"registration_mode,omitempty"`
 
-	// LastSyncedAt — kedy sa naposledy refresh-ovalo z env (unix ts).
+	// LastSyncedAt - kedy sa naposledy refresh-ovalo z env (unix ts).
 	LastSyncedAt int64 `json:"last_synced_at,omitempty"`
 }
 
@@ -63,7 +63,7 @@ func authConfigPath(boxID string) string {
 //   - prepíše JSON súbor s aktuálnymi env hodnotami
 //   - aktualizuje authConfigCache
 //
-// Ak file write zlyhá, vráti error ale cache je aj tak naplnená — frontend
+// Ak file write zlyhá, vráti error ale cache je aj tak naplnená - frontend
 // dostane cez /api/info aspoň env hodnoty (in-memory).
 func SyncAuthConfigFromEnv(boxID string) error {
 	cfg := AuthConfig{
@@ -105,7 +105,7 @@ func LoadAuthConfigFromFile(boxID string) (AuthConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
-	// Hydrate in-memory cache too — caller-side GetAuthConfig() dostane
+	// Hydrate in-memory cache too - caller-side GetAuthConfig() dostane
 	// rovnaké hodnoty bez ďalšieho file read.
 	authConfigCache.mu.Lock()
 	authConfigCache.cfg = cfg

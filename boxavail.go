@@ -9,7 +9,7 @@ package sdk
 // CallBox() to actually invoke the dep when it's available.
 //
 // Hard deps (`"required": true`) are enforced by the manager at start-up
-// — caller doesn't need to check. This helper is purely for soft deps.
+// - caller doesn't need to check. This helper is purely for soft deps.
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 // is set (dev.ps1 -> APISELF_SESSION_TOKEN=devtoken) and the same value
 // becomes the DB's local_session_token, so the box-side header matches.
 // In production the var is unset and manager has no password set, so
-// requests pass through without this header anyway — making this a
+// requests pass through without this header anyway - making this a
 // no-op rather than a regression.
 func applyManagerAuth(req *http.Request) {
 	if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
@@ -52,11 +52,11 @@ type BoxAvailability struct {
 // IsBoxAvailable asks the manager whether `boxID` is installed, running,
 // and (optionally) at least at version `since`. Pass empty string for
 // `since` to skip the version gate. Pass empty or zero `timeout` to use
-// a 2-second default — the manager's local lookup is cheap, this is a
+// a 2-second default - the manager's local lookup is cheap, this is a
 // safety net for stuck connections.
 //
 // Returns nil + non-nil error on transport failure (manager unreachable
-// from inside the box's process — uncommon, both run on localhost).
+// from inside the box's process - uncommon, both run on localhost).
 // Returns the result with Reason="ok" on success.
 func IsBoxAvailable(ctx context.Context, boxID, since string, timeout time.Duration) (*BoxAvailability, error) {
 	if boxID == "" {
@@ -107,10 +107,10 @@ func IsBoxAvailable(ctx context.Context, boxID, since string, timeout time.Durat
 // CallBox makes an HTTP request to another box via the manager's
 // /box-{id}/* reverse proxy. The manager handles routing, port
 // resolution, and inter-box auth (it injects an X-APISelf-Caller header
-// on requests originating from another box's process — boxes can verify
+// on requests originating from another box's process - boxes can verify
 // that header before serving sensitive endpoints).
 //
-// The returned response is the raw http.Response — caller is responsible
+// The returned response is the raw http.Response - caller is responsible
 // for reading and closing the body. Use this when the response is bytes
 // (DOCX, PDF, image data, etc.) where automatic JSON parsing would be
 // wrong. For JSON responses, parse env.Data yourself with the standard
@@ -136,7 +136,7 @@ func CallBox(ctx context.Context, boxID, method, path string, body io.Reader, co
 		path = "/" + path
 	}
 
-	// Manager exposes other boxes at /box-{slug}/* — slug is the box ID
+	// Manager exposes other boxes at /box-{slug}/* - slug is the box ID
 	// without the apiself-box- prefix. Same convention as elsewhere.
 	slug := strings.TrimPrefix(boxID, "apiself-box-")
 	endpoint := GetCoreURL() + "/box-" + slug + path
@@ -148,11 +148,11 @@ func CallBox(ctx context.Context, boxID, method, path string, body io.Reader, co
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	// Manager auth — when bound to anything other than loopback or set up
+	// Manager auth - when bound to anything other than loopback or set up
 	// with a password (i.e. production single-user installs), the
 	// /box-{slug}/* proxy rejects requests without X-APISelf-Token. Box
 	// processes inherit the same APISELF_SESSION_TOKEN value the manager
-	// stored as local_session_token, so applying it here lets box→box
+	// stored as local_session_token, so applying it here lets box->box
 	// CallBox traffic pass through that gate.
 	applyManagerAuth(req)
 	// Also forward the box-token header so the CALLEE box's own
@@ -162,7 +162,7 @@ func CallBox(ctx context.Context, boxID, method, path string, body io.Reader, co
 		req.Header.Set("X-APISELF-Box-Token", tok)
 	}
 	// The manager appends X-APISelf-Caller automatically when this request
-	// is proxied through it. We don't set it here — the callee should not
+	// is proxied through it. We don't set it here - the callee should not
 	// trust caller-set values.
 	return http.DefaultClient.Do(req)
 }

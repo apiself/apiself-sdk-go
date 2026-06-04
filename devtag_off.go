@@ -6,7 +6,7 @@ package sdk
 // Production binárky kompilované bez `-tags dev` majú allowDevBypass = false;
 // bypass kód v initbox.go sa stáva dead-code-em pri kompilácii.
 //
-// Pre dev workflow: `go build -tags dev` → načíta sa devtag_on.go kde je
+// Pre dev workflow: `go build -tags dev` -> načíta sa devtag_on.go kde je
 // allowDevBypass = true a env var APISELF_DEV_LOCAL=1 môže preskočiť strict
 // licenčný check.
 //

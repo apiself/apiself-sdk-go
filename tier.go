@@ -7,16 +7,16 @@ import (
 )
 
 // TierRank defines the precedence of license tiers. A higher rank means more
-// privileges. Free is always the floor — a box that cannot verify its license
+// privileges. Free is always the floor - a box that cannot verify its license
 // (missing JWT, expired trial, cloud-confirmed revocation) keeps running with
 // FREE-tier features instead of exiting.
 //
 // Trial licenses carry tir="pro" with an ExpiresAt. They behave like Pro until
 // expiry; afterwards the SDK auto-downgrades the runtime tier to "free".
 //
-// Enterprise tier was retired (2026-04-30) — features collapsed into Pro.
+// Enterprise tier was retired (2026-04-30) - features collapsed into Pro.
 var TierRank = map[string]int{
-	"":      1, // missing/unknown — treat as free
+	"":      1, // missing/unknown - treat as free
 	"free":  1,
 	"basic": 2,
 	"pro":   3,
@@ -59,13 +59,13 @@ func normalizeTier(t string) string {
 	if _, ok := TierRank[t]; ok {
 		return t
 	}
-	// Legacy values seen in old JWTs — collapse to nearest current tier.
+	// Legacy values seen in old JWTs - collapse to nearest current tier.
 	switch t {
 	case "trial":
 		// Trial JWTs should carry tir="pro" already, but be defensive.
 		return "pro"
 	case "enterprise":
-		// Enterprise retired — grandfathered licenses behave as Pro.
+		// Enterprise retired - grandfathered licenses behave as Pro.
 		return "pro"
 	case "paid":
 		return "basic"
@@ -111,7 +111,7 @@ func currentTier() string {
 }
 
 // downgradeToFree marks the license as expired and sets the runtime tier to
-// "free". Idempotent — safe to call multiple times.
+// "free". Idempotent - safe to call multiple times.
 func (s *licenseState) downgradeToFree() {
 	s.mu.Lock()
 	s.tier = "free"

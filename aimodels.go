@@ -3,12 +3,12 @@ package sdk
 // Box-side helper for accessing shared AI models managed by the manager.
 //
 // Models live in {DataDir}/shared/ai-models/{family}/{id}.{ext} and are
-// shared across boxes — transcribe Pro, future image-gen, future LLM all
+// shared across boxes - transcribe Pro, future image-gen, future LLM all
 // read from the same files. The manager owns download orchestration; this
 // helper just resolves paths and (optionally) blocks until a model is
 // ready by calling the manager's HTTP API.
 //
-// Boxes never write into shared/ — the manager is the only writer.
+// Boxes never write into shared/ - the manager is the only writer.
 
 import (
 	"encoding/json"
@@ -32,7 +32,7 @@ import (
 // Cancellation is via the (caller-controlled) timeout: pick a duration
 // long enough for a 3 GB download on a slow connection (e.g. 30 min).
 func AIModelPath(family, id string, timeout time.Duration) (string, error) {
-	// Fast path: file exists on disk → no manager round-trip needed.
+	// Fast path: file exists on disk -> no manager round-trip needed.
 	if path := localAIModelPath(family, id); path != "" {
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
@@ -51,7 +51,7 @@ func AIModelPath(family, id string, timeout time.Duration) (string, error) {
 		return state.DiskPath, nil
 	}
 
-	// Trigger the download (idempotent — manager dedupes concurrent calls
+	// Trigger the download (idempotent - manager dedupes concurrent calls
 	// for the same model). Then poll status until done or failed.
 	if state.State != "downloading" {
 		req, err := http.NewRequest(http.MethodPost, downloadURL, nil)
@@ -74,7 +74,7 @@ func AIModelPath(family, id string, timeout time.Duration) (string, error) {
 		time.Sleep(2 * time.Second)
 		state, err = getAIModelStatus(statusURL)
 		if err != nil {
-			continue // transient — keep polling
+			continue // transient - keep polling
 		}
 		switch state.State {
 		case "done":
@@ -138,7 +138,7 @@ func getAIModelStatus(url string) (*aiModelStatus, error) {
 //
 // Layout: {DataDir}/shared/ai-models/{family}/{id}.bin (Whisper). For
 // other families we fall through and trust the manager's status response.
-// This intentionally only knows about the most common case — the ext
+// This intentionally only knows about the most common case - the ext
 // is family-specific (.safetensors, .gguf, .onnx) and lives in the
 // manifest. Pre-check is best-effort; the manager is always authoritative.
 func localAIModelPath(family, id string) string {

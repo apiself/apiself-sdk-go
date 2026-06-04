@@ -1,4 +1,4 @@
-// Notify cross-box helpers — let any box dispatch a notification (email
+// Notify cross-box helpers - let any box dispatch a notification (email
 // / Slack / Telegram / webhook ...) through the optional apiself-box-notify
 // gateway. Callers degrade gracefully when notify is not installed: the
 // caller's UI shows an "install Notify" CTA or falls back to a `mailto:`
@@ -10,13 +10,13 @@
 //       Dispatch a single message.
 //
 //   NotifyRegisterTemplates(ctx, "apiself-box-foo", []NotifyTemplate{...})
-//       Idempotent — call at box startup. Notify reflects the templates
+//       Idempotent - call at box startup. Notify reflects the templates
 //       in its admin UI and the user can override subject/body/html.
 //       Default fields are updated; user overrides are preserved.
 //
 // Both rely on CallBox + the /api/cb/* surface defined in
 // apiself-box-notify. Auth is done by Manager's proxy injecting an
-// X-APISelf-Caller header — callers do not authenticate explicitly.
+// X-APISelf-Caller header - callers do not authenticate explicitly.
 
 package sdk
 
@@ -34,7 +34,7 @@ import (
 const NotifyBoxID = "apiself-box-notify"
 
 // ErrNotifyUnavailable means Notify is not installed / not running. The
-// caller should not treat this as a hard failure — it's the contract for
+// caller should not treat this as a hard failure - it's the contract for
 // a soft cross-box dep. Decide per-feature whether to suppress or to
 // surface an install CTA to the end user.
 var ErrNotifyUnavailable = errors.New("sdk: apiself-box-notify is not installed or not running")
@@ -69,7 +69,7 @@ type NotifyResponse struct {
 
 // NotifyTemplate is the registration payload entry. Notify auto-extracts
 // variable names from {{var}} occurrences in Subject/Body/HTML when Vars
-// is empty — caller boxes that want to be explicit can list them anyway
+// is empty - caller boxes that want to be explicit can list them anyway
 // to keep the admin UI authoritative.
 type NotifyTemplate struct {
 	Key            string   `json:"key"`
@@ -120,7 +120,7 @@ func NotifySend(ctx context.Context, req NotifyRequest) (*NotifyResponse, error)
 // NotifyRegisterTemplates is the idempotent install/upgrade hook. Call
 // it from your box's main.go right after sdk.InitBox completes; safe to
 // invoke on every startup. If Notify isn't installed yet, this returns
-// ErrNotifyUnavailable and you can simply ignore it — when the user
+// ErrNotifyUnavailable and you can simply ignore it - when the user
 // installs Notify later, the next box restart will register templates.
 func NotifyRegisterTemplates(ctx context.Context, boxID string, templates []NotifyTemplate) error {
 	if len(templates) == 0 {
@@ -155,7 +155,7 @@ func callNotify(ctx context.Context, method, path string, body []byte, event str
 	if event != "" {
 		// Header injection via CallBox isn't supported by the helper
 		// signature; manager proxy passes through whatever headers
-		// we'd want — but our CallBox sets the request before sending.
+		// we'd want - but our CallBox sets the request before sending.
 		// Practical solution: re-send via direct http.Client with
 		// header attached.
 		_ = req // CallBox already executed the request; falling back

@@ -55,7 +55,7 @@ type LicenseClaims struct {
 }
 
 // GetHWID vráti stabilný HWID tohto stroja.
-// Primárne používa machineid.ProtectedID("apiself") — HMAC-SHA256 machine-id,
+// Primárne používa machineid.ProtectedID("apiself") - HMAC-SHA256 machine-id,
 // s fallback na SHA256(hostname:username) ak machine-id nie je dostupný.
 func GetHWID() (string, error) {
 	primary, err := machineid.ProtectedID("apiself")
@@ -107,7 +107,7 @@ func registerInstance(instanceID, signedToken, cloudURL string) bool {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(cloudURL+"/api/license/instance/register", "application/json", bytes.NewReader(body))
 	if err != nil {
-		// Cloud nedostupný — povolíme (offline tolerancia)
+		// Cloud nedostupný - povolíme (offline tolerancia)
 		log.Printf("APISelf: instance register zlyhal (cloud nedostupný): %v", err)
 		return true
 	}
@@ -121,7 +121,7 @@ func registerInstance(instanceID, signedToken, cloudURL string) bool {
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 	if !result.Success {
-		// Neočakávaná odpoveď → offline tolerancia
+		// Neočakávaná odpoveď -> offline tolerancia
 		return true
 	}
 	return result.Data.Allowed
@@ -153,19 +153,19 @@ func unregisterInstance(instanceID, cloudURL string) {
 
 // periodicRevocationCheck polls the cloud every 6 hours. When the cloud
 // confirms the licence is no longer valid, the runtime tier is downgraded to
-// FREE — the box keeps running with FREE-tier features instead of exiting.
-// Cloud unreachable → skip (offline tolerance).
+// FREE - the box keeps running with FREE-tier features instead of exiting.
+// Cloud unreachable -> skip (offline tolerance).
 func periodicRevocationCheck(conf BoxConfig, token, cloudURL string, state *licenseState) {
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		if state.expired.Load() {
-			// Already downgraded — nothing more to verify.
+			// Already downgraded - nothing more to verify.
 			return
 		}
 		if !isCloudOnline(cloudURL) {
-			log.Printf("APISelf: cloud unreachable — revocation check skipped")
+			log.Printf("APISelf: cloud unreachable - revocation check skipped")
 			continue
 		}
 
@@ -186,7 +186,7 @@ func periodicRevocationCheck(conf BoxConfig, token, cloudURL string, state *lice
 		resp.Body.Close()
 
 		if result.Success && !result.Data.Valid {
-			fmt.Printf("APISelf: licence for '%s' revoked by cloud — continuing in FREE mode.\n", conf.ID)
+			fmt.Printf("APISelf: licence for '%s' revoked by cloud - continuing in FREE mode.\n", conf.ID)
 			state.downgradeToFree()
 			return
 		}
@@ -243,7 +243,7 @@ var Log *slog.Logger = slog.Default()
 var logInitOnce sync.Once
 
 // InitLogger inicializuje štruktúrovaný slog logger pre box.
-// Výstup smeruje na stdout (zachytávaný supervisorom → záložka Logs) a do
+// Výstup smeruje na stdout (zachytávaný supervisorom -> záložka Logs) a do
 // rotujúceho súboru logDir/app.log (pre lokálneho vývojára).
 //
 // boxID je automaticky pridaný do každého záznamu (pole "box_id").
@@ -358,9 +358,9 @@ func (rw *rotatingWriter) rotate() {
 
 // LoggingMiddleware obalí HTTP handler a každý request zaznamená v APISelf Manageri.
 //
-// Requesty prichádzajúce cez manager proxy (X-Forwarded-By: apiself-core) sú preskočené —
+// Requesty prichádzajúce cez manager proxy (X-Forwarded-By: apiself-core) sú preskočené -
 // proxy ich loguje sama. Priame requesty (direct) sú odoslané na POST /api/core/log.
-// Statické assety (JS, CSS, obrázky) sú ticho preskočené — nie sú zaujímavé pre logy.
+// Statické assety (JS, CSS, obrázky) sú ticho preskočené - nie sú zaujímavé pre logy.
 //
 // Použitie v boxe:
 //
@@ -370,13 +370,13 @@ func LoggingMiddleware(boxID string, next http.Handler) http.Handler {
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Requesty cez proxy sú už zalogované proxy vrstvou — preskočíme
+		// Requesty cez proxy sú už zalogované proxy vrstvou - preskočíme
 		if r.Header.Get("X-Forwarded-By") == "apiself-core" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Statické assety nelogujeme — zbytočný šum
+		// Statické assety nelogujeme - zbytočný šum
 		if isStaticAsset(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
@@ -398,7 +398,7 @@ func LoggingMiddleware(boxID string, next http.Handler) http.Handler {
 			ip = host
 		}
 
-		msg := fmt.Sprintf("%s %s → %d (%dms) [direct, from: %s]", r.Method, r.URL.Path, status, elapsed, ip)
+		msg := fmt.Sprintf("%s %s -> %d (%dms) [direct, from: %s]", r.Method, r.URL.Path, status, elapsed, ip)
 
 		go func() {
 			payload, _ := json.Marshal(map[string]string{

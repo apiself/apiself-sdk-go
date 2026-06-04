@@ -9,9 +9,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// SessionClaims — to čo auth box podpisuje do session JWT.
+// SessionClaims - to čo auth box podpisuje do session JWT.
 // Mirror SessionClaims z apiself-box-auth/internal/auth/jwt.go.
-// Box nepotrebuje celý struct — len polia ktoré GetUser číta.
+// Box nepotrebuje celý struct - len polia ktoré GetUser číta.
 type SessionClaims struct {
 	jwt.RegisteredClaims
 	UserID    string `json:"uid"`
@@ -35,7 +35,7 @@ type SessionClaims struct {
 //   - signature verifies against cached pubkey
 //
 // Vracia (claims, nil) pri úspešnej validácii alebo (nil, err) inak.
-// Caller (sdk.GetUser) interpretuje err ako "neprihlásený" — žiadne 401
+// Caller (sdk.GetUser) interpretuje err ako "neprihlásený" - žiadne 401
 // sa neposiela automaticky, to je úloha RequireAuth middleware-u.
 func ValidateJWT(boxID, token string) (*SessionClaims, error) {
 	if token == "" {
@@ -53,7 +53,7 @@ func ValidateJWT(boxID, token string) (*SessionClaims, error) {
 		return pub, nil
 	})
 	if err != nil {
-		// Pubkey mohla rotovať — skús refresh raz a re-validate.
+		// Pubkey mohla rotovať - skús refresh raz a re-validate.
 		// Detekujeme cez signature error string (jwt/v5 nemá distinct error type).
 		if strings.Contains(err.Error(), "signature is invalid") ||
 			strings.Contains(err.Error(), "verification error") {
@@ -86,8 +86,8 @@ func ValidateJWT(boxID, token string) (*SessionClaims, error) {
 
 // extractToken hľadá JWT v requeste v poradí:
 //
-//   1. Cookie "apiself_auth" — manager-proxy mode + same-origin direct-port
-//   2. Authorization: Bearer <token> — direct-port cross-origin
+//   1. Cookie "apiself_auth" - manager-proxy mode + same-origin direct-port
+//   2. Authorization: Bearer <token> - direct-port cross-origin
 //
 // Vracia "" ak ani jedno nie je prítomné.
 func extractToken(r *http.Request) string {

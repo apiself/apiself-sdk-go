@@ -22,13 +22,13 @@ import (
 // X-APISelf-* hlavičky do proxy requestu na box; box im veril bez vlastnej
 // validácie. Nevýhody:
 //
-//  1. Direct-port access bol tvrdo blokovaný (RequireManagerProxy → 401).
+//  1. Direct-port access bol tvrdo blokovaný (RequireManagerProxy -> 401).
 //  2. Ak manager spadol, box nemal ako overiť cookie sám.
 //  3. Ak auth box spadol, UI degradovalo na placeholder owner (security bypass).
 //
 // V0.7 box pri prvom štarte fetchne auth-box pubkey + uloží na disk
 // ({BoxDataDir}/auth_pubkey.pem). Pri validácii cookie / Bearer tokenu
-// si box vystačí lokálne — žiadny network hop, žiadna závislosť od managera.
+// si box vystačí lokálne - žiadny network hop, žiadna závislosť od managera.
 
 // authPubKeyState drží lazy-loaded RSA public key auth boxu + súbor s
 // jeho PEM kópiou. Cached medzi requestami; refresh keď validácia zlyhá.
@@ -49,14 +49,14 @@ func authPubKeyPath(boxID string) string {
 // LoadAuthPubKey lazy-loaduje auth-box pubkey buď z disku, alebo
 // (ak chýba / je starý) fetchne z auth boxu cez APISELF_AUTH_BOX_URL.
 //
-// boxID je hosting box (ten ktorý SDK kompilujeme do — forms, recorder, …),
+// boxID je hosting box (ten ktorý SDK kompilujeme do - forms, recorder, …),
 // nie auth box. Cesta cache: {BoxDataDir(boxID)}/auth_pubkey.pem.
 //
-// Vracia (nil, nil) ak APISELF_AUTH_BOX_URL nie je nastavené — box beží
+// Vracia (nil, nil) ak APISELF_AUTH_BOX_URL nie je nastavené - box beží
 // v single-user móde a tento helper sa nemal volať. Caller (GetUser) v tom
 // prípade pokračuje bez auth validácie.
 //
-// Bezpečné na concurrent volanie — sync.RWMutex interne.
+// Bezpečné na concurrent volanie - sync.RWMutex interne.
 func LoadAuthPubKey(boxID string) (*rsa.PublicKey, error) {
 	globalAuthPubKey.mu.RLock()
 	if globalAuthPubKey.parsed != nil {
@@ -72,7 +72,7 @@ func LoadAuthPubKey(boxID string) (*rsa.PublicKey, error) {
 		return globalAuthPubKey.parsed, nil
 	}
 
-	// Cesta 1 — disk cache
+	// Cesta 1 - disk cache
 	path := authPubKeyPath(boxID)
 	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 		if pub, perr := parsePubKeyPEM(string(data)); perr == nil {
@@ -80,13 +80,13 @@ func LoadAuthPubKey(boxID string) (*rsa.PublicKey, error) {
 			globalAuthPubKey.pem = string(data)
 			return pub, nil
 		}
-		// Súbor je rozbitý — pokračuj na fetch
+		// Súbor je rozbitý - pokračuj na fetch
 	}
 
-	// Cesta 2 — fetch z auth boxu
+	// Cesta 2 - fetch z auth boxu
 	url := os.Getenv("APISELF_AUTH_BOX_URL")
 	if url == "" {
-		return nil, errors.New("APISELF_AUTH_BOX_URL not set — auth box not detected")
+		return nil, errors.New("APISELF_AUTH_BOX_URL not set - auth box not detected")
 	}
 	pemStr, err := fetchAuthPubKey(url)
 	if err != nil {
@@ -96,7 +96,7 @@ func LoadAuthPubKey(boxID string) (*rsa.PublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse fetched pubkey: %w", err)
 	}
-	// Ulož na disk — best-effort, nezlyháme ak write zlyhá
+	// Ulož na disk - best-effort, nezlyháme ak write zlyhá
 	_ = os.WriteFile(path, []byte(pemStr), 0o600)
 	globalAuthPubKey.parsed = pub
 	globalAuthPubKey.pem = pemStr
@@ -104,7 +104,7 @@ func LoadAuthPubKey(boxID string) (*rsa.PublicKey, error) {
 }
 
 // RefreshAuthPubKey nuluje cache a vynúti opakovaný fetch z auth boxu.
-// Volaj keď JWT validácia zlyhá so signature error — možná pubkey rotácia.
+// Volaj keď JWT validácia zlyhá so signature error - možná pubkey rotácia.
 func RefreshAuthPubKey(boxID string) error {
 	globalAuthPubKey.mu.Lock()
 	globalAuthPubKey.parsed = nil

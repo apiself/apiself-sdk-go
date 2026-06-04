@@ -7,18 +7,18 @@
 // that's a CROSS-ORIGIN request from the browser to the Manager
 // (localhost:7474). The whole house of cards then depends on the
 // Manager emitting Access-Control-Allow-Origin headers that match what
-// the browser expects given the request's `credentials` mode — a
+// the browser expects given the request's `credentials` mode - a
 // surprisingly fragile contract that has broken multiple times.
 //
 // RegisterCrossBoxProxy sidesteps the entire CORS surface by giving the
 // host box's BACKEND a same-origin route that forwards to the Manager.
 // The UI fetches `/api/cb/proxy/box-{slug}/<path>` against its own
-// origin (same-origin → no CORS preflight, no Allow-Origin gymnastics),
+// origin (same-origin -> no CORS preflight, no Allow-Origin gymnastics),
 // the Go backend then makes a server-to-server call to the Manager,
 // and Manager normally proxies to the target box with the usual auth
 // header injection (X-APISelf-Caller-Box).
 //
-// Trust model is preserved: Manager still owns the source-port→box-ID
+// Trust model is preserved: Manager still owns the source-port->box-ID
 // mapping and injects the caller header itself. We are not bypassing
 // the Manager; we are bypassing the BROWSER's CORS layer.
 //
@@ -48,11 +48,11 @@ const (
 // RegisterCrossBoxProxy installs the proxy route on the given mux.
 // TWO upstream targets are supported:
 //
-//  1. /api/cb/proxy/box-{slug}/<rest>  →  <core-url>/box-{slug}/<rest>
-//     — for calling OTHER boxes through their manager-proxied API.
+//  1. /api/cb/proxy/box-{slug}/<rest>  ->  <core-url>/box-{slug}/<rest>
+//     - for calling OTHER boxes through their manager-proxied API.
 //
-//  2. /api/cb/proxy/manager/<rest>     →  <core-url>/<rest>
-//     — for calling MANAGER ROOT endpoints (e.g.
+//  2. /api/cb/proxy/manager/<rest>     ->  <core-url>/<rest>
+//     - for calling MANAGER ROOT endpoints (e.g.
 //     /api/boxes/{id}/availability used by useBoxAvailable). Without
 //     this passthrough the box's UI would have to fetch the manager
 //     directly with managerBase(), which is cross-origin when the UI
@@ -64,7 +64,7 @@ const (
 // response headers (except hop-by-hop).
 //
 // Authorization is stripped from outbound requests because Manager
-// identifies callers by source port, not by client-supplied tokens —
+// identifies callers by source port, not by client-supplied tokens -
 // forwarding a stale or forged Authorization could let one box
 // impersonate another.
 func RegisterCrossBoxProxy(mux *http.ServeMux) {
@@ -75,10 +75,10 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	var tail string
 	switch {
 	case strings.HasPrefix(r.URL.Path, crossBoxProxyBoxPrefix):
-		// /api/cb/proxy/box-<slug>/<rest>  →  /box-<slug>/<rest>
+		// /api/cb/proxy/box-<slug>/<rest>  ->  /box-<slug>/<rest>
 		tail = strings.TrimPrefix(r.URL.Path, "/api/cb/proxy")
 	case strings.HasPrefix(r.URL.Path, crossBoxProxyManagerPrefix):
-		// /api/cb/proxy/manager/<rest>  →  /<rest>
+		// /api/cb/proxy/manager/<rest>  ->  /<rest>
 		tail = "/" + strings.TrimPrefix(r.URL.Path, crossBoxProxyManagerPrefix)
 	default:
 		http.NotFound(w, r)
@@ -103,9 +103,9 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	copyRequestHeaders(req.Header, r.Header)
 	req.Header.Del("Authorization") // never forward; Manager injects identity
 	// Strip reverse-proxy-only headers. Caddy/nginx infront of the Manager
-	// set these so the FIRST hop (user → Manager) is correctly classified as
-	// Remote. But this SECOND hop (box → Manager loopback) is genuinely a
-	// localhost call — if we propagate the headers, Manager.detectSourceType
+	// set these so the FIRST hop (user -> Manager) is correctly classified as
+	// Remote. But this SECOND hop (box -> Manager loopback) is genuinely a
+	// localhost call - if we propagate the headers, Manager.detectSourceType
 	// honours them and labels the inner call as Remote too. With Remote off
 	// in the default access policy, the cross-box call gets 403 even though
 	// every IO happened on 127.0.0.1. 2026-05-28 user reported breaks
@@ -115,7 +115,7 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	req.Header.Del("X-Forwarded-Proto")
 	req.Header.Del("X-Real-IP")
 	req.Header.Del("Forwarded")
-	// Inter-box auth — boxes that gate their /api/cb/* endpoints (e.g.
+	// Inter-box auth - boxes that gate their /api/cb/* endpoints (e.g.
 	// Storage's CrossBoxSave, Notify's CrossBoxSend) check the
 	// X-APISELF-Box-Token header against their own APISELF_SESSION_TOKEN
 	// env var. The Manager hands every box the same token via
@@ -127,7 +127,7 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	// no-op.
 	if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
 		req.Header.Set("X-APISELF-Box-Token", tok)
-		// X-APISelf-Token — manager's own auth middleware checks this
+		// X-APISelf-Token - manager's own auth middleware checks this
 		// against local_session_token in the manager DB. Required when
 		// the proxy target is /api/cb/proxy/manager/* (manager-root
 		// passthrough) and the manager has a password set; also harmless
@@ -138,7 +138,7 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		// Manager unreachable or refused the upstream — treat as 502 so
+		// Manager unreachable or refused the upstream - treat as 502 so
 		// the caller can distinguish from "target box returned 404".
 		http.Error(w, "cb_proxy: upstream: "+err.Error(), http.StatusBadGateway)
 		return
@@ -172,9 +172,9 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-// RFC 7230 §6.1 — connection-specific headers that must not be
+// RFC 7230 §6.1 - connection-specific headers that must not be
 // forwarded across hops. We also treat "Content-Length" as
-// automatically managed by Go's HTTP layer — we don't copy it
+// automatically managed by Go's HTTP layer - we don't copy it
 // explicitly to avoid mismatches when the body changes encoding.
 func isHopByHopHeader(name string) bool {
 	switch strings.ToLower(name) {

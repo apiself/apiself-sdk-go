@@ -10,35 +10,35 @@ import (
 // Phase 1 (single-user mode): keď nie je nainštalovaný auth box, Manager
 // injektuje placeholder hlavičky `X-APISelf-User: owner`,
 // `X-APISelf-Tier: admin`, `X-APISelf-Admin: 1`. GetUser vráti owner-a
-// bez ďalšieho fetch-u — box code nemusí rozlišovať.
+// bez ďalšieho fetch-u - box code nemusí rozlišovať.
 //
 // Phase 2 (multi-user mode, auth box installed): Manager validuje
 // `apiself_auth` cookie cez auth box public key (cache-ovaný v Manager DB)
 // a injektuje reálneho user-a do hlavičiek pri každom proxy requeste.
 type User struct {
-	// ID — stabilný identifikátor user-a. "owner" v single-user móde,
+	// ID - stabilný identifikátor user-a. "owner" v single-user móde,
 	// jinak UUID z auth box DB.
 	ID string
 
-	// Email — voliteľný (môže byť prázdny v single-user móde).
+	// Email - voliteľný (môže byť prázdny v single-user móde).
 	Email string
 
-	// Role — "admin" / "member" / "viewer" v multi-user, "admin" pre owner-a
-	// v single-user. Box code zriedka číta priamo — preferuj IsAdmin / HasRole.
+	// Role - "admin" / "member" / "viewer" v multi-user, "admin" pre owner-a
+	// v single-user. Box code zriedka číta priamo - preferuj IsAdmin / HasRole.
 	Role string
 
-	// IsAdmin — true ak Manager nahodil X-APISelf-Admin=1 (owner ALEBO
+	// IsAdmin - true ak Manager nahodil X-APISelf-Admin=1 (owner ALEBO
 	// auth box rola admin/owner).
 	IsAdmin bool
 
-	// IsOwner — true ak Manager identifikuje user-a ako Manager owner-a
+	// IsOwner - true ak Manager identifikuje user-a ako Manager owner-a
 	// (single-user mode placeholder, alebo prvý user v auth box DB).
 	IsOwner bool
 
-	// Authenticated — true ak X-APISelf-User hlavička je nastavená.
+	// Authenticated - true ak X-APISelf-User hlavička je nastavená.
 	// V Phase 1 je vždy true (Manager injectuje placeholder owner). V
 	// Phase 2 je false ak auth box session cookie chýba alebo je expirovaná
-	// — box by potom nemal renderovať user-specific content (use AuthGuard
+	// - box by potom nemal renderovať user-specific content (use AuthGuard
 	// v UI alebo RequireAuth middleware na strane servera).
 	Authenticated bool
 }
@@ -58,12 +58,12 @@ func SetAuthBoxID(id string) {
 
 // GetUser extrahuje user-a v tomto poradí:
 //
-//  1. Manager-proxied request (X-Forwarded-By: apiself-core) → trust headers.
-//     Toto je rýchla cesta — manager už validoval cookie a injektol hlavičky,
+//  1. Manager-proxied request (X-Forwarded-By: apiself-core) -> trust headers.
+//     Toto je rýchla cesta - manager už validoval cookie a injektol hlavičky,
 //     žiadny dôvod robiť to znova.
-//  2. Inak (direct-port access) → extract JWT z cookie alebo Authorization
+//  2. Inak (direct-port access) -> extract JWT z cookie alebo Authorization
 //     header a validuj lokálne pomocou cached auth-box pubkey-u.
-//  3. Bez tokenu / invalid token → User{Authenticated: false}.
+//  3. Bez tokenu / invalid token -> User{Authenticated: false}.
 //
 // Box code typicky používa:
 //
@@ -75,7 +75,7 @@ func SetAuthBoxID(id string) {
 //
 // Pre kontroly typu "stačí member alebo vyšší" preferuj sdk.HasRole(r, "member").
 func GetUser(r *http.Request) User {
-	// Cesta 1 — manager-proxied. X-Forwarded-By je nastavená iba managerom
+	// Cesta 1 - manager-proxied. X-Forwarded-By je nastavená iba managerom
 	// po stripnutí všetkých client-supplied X-APISelf-* hlavičiek, takže
 	// im môžeme veriť. Bez tejto hlavičky by sa dali zaspoofiť.
 	if r.Header.Get("X-Forwarded-By") == "apiself-core" {
@@ -90,8 +90,8 @@ func GetUser(r *http.Request) User {
 		}
 	}
 
-	// Cesta 2 — direct port. Extract token z cookie / Authorization header
-	// a validuj cez cached pubkey. Funguje aj keď manager nebeží — box je
+	// Cesta 2 - direct port. Extract token z cookie / Authorization header
+	// a validuj cez cached pubkey. Funguje aj keď manager nebeží - box je
 	// sebestačný.
 	token := extractToken(r)
 	if token == "" {
@@ -157,10 +157,10 @@ func RequireRole(minRole string, next http.HandlerFunc) http.HandlerFunc {
 //	if sdk.IsMultiUser() {
 //	    // ukáž "share with team" tlačidlo
 //	} else {
-//	    // single-user — schovaj pozvánky / RBAC sekciu
+//	    // single-user - schovaj pozvánky / RBAC sekciu
 //	}
 //
-// Pre per-feature gating preferuj per-row owner_id check + HasRole — toto
+// Pre per-feature gating preferuj per-row owner_id check + HasRole - toto
 // je iba globálny mode signál.
 func IsMultiUser() bool {
 	return os.Getenv("APISELF_AUTH_BOX_URL") != ""
@@ -168,7 +168,7 @@ func IsMultiUser() bool {
 
 // AuthBoxURL vráti URL na auth box (alebo "" ak nie je nainštalovaný).
 // Použité hlavne SDK UI komponentmi pre fetch /api/whoami priamo cez
-// proxy URL — server-side Go kód obvykle vystačí s GetUser(r).
+// proxy URL - server-side Go kód obvykle vystačí s GetUser(r).
 func AuthBoxURL() string {
 	return os.Getenv("APISELF_AUTH_BOX_URL")
 }
@@ -177,7 +177,7 @@ func AuthBoxURL() string {
 // (X-Forwarded-By=apiself-core hlavička, ktorú Manager bezpečne nastavuje
 // po stripnutí všetkých client-supplied X-* hlavičiek).
 //
-// Direct-port access (napr. cez localhost:7610) NEMÁ túto hlavičku —
+// Direct-port access (napr. cez localhost:7610) NEMÁ túto hlavičku -
 // nikto okrem Manager-a ju nemôže nahodiť.
 func IsManagerProxied(r *http.Request) bool {
 	return r.Header.Get("X-Forwarded-By") == "apiself-core"
@@ -190,14 +190,14 @@ func IsManagerProxied(r *http.Request) bool {
 //   - Direct-port request s validným cookie / Authorization Bearer JWT
 //
 // V single-user mode (auth box nebeží alebo nie je nainštalovaný)
-// middleware pass-throughne — placeholder owner je vždy "prihlásený".
+// middleware pass-throughne - placeholder owner je vždy "prihlásený".
 //
 // Použitie:
 //
 //	mux.Handle("/api/admin/", sdk.RequireAuth(http.HandlerFunc(h.AdminHandler)))
 func RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Single-user mode → pass-through. APISELF_AUTH_BOX_URL chýba
+		// Single-user mode -> pass-through. APISELF_AUTH_BOX_URL chýba
 		// znamená že auth box nikdy nebol detekovaný managerom.
 		if !IsMultiUser() {
 			next.ServeHTTP(w, r)

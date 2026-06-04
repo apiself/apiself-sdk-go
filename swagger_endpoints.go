@@ -10,7 +10,7 @@ import (
 
 // EndpointsFromSwagger reads `.apiself/swagger.json` and returns its paths
 // formatted as ["METHOD /path", ...] sorted by path then method. This is the
-// canonical source of truth for the `BoxInfo.Endpoints` field — boxes should
+// canonical source of truth for the `BoxInfo.Endpoints` field - boxes should
 // not maintain a separate hand-written slice that drifts from swagger.
 //
 // Same candidate paths as LoadConfig (cwd, parent, exe-dir). Returns nil if
@@ -57,7 +57,7 @@ func EndpointsFromSwagger() []string {
 		return nil
 	}
 
-	// HTTP method whitelist — swagger paths can include vendor extensions
+	// HTTP method whitelist - swagger paths can include vendor extensions
 	// (x-foo) and shared parameter sections we don't want to render as endpoints.
 	allowed := map[string]struct{}{
 		"get": {}, "post": {}, "put": {}, "delete": {},

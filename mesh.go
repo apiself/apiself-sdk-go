@@ -1,7 +1,7 @@
 package sdk
 
 // MeshClient umožňuje boxom komunikovať cez APISelf P2P mesh sieť.
-// Správy sú prenášané managerom (Noise protokol) — box nemusí poznať sieťovú topológiu.
+// Správy sú prenášané managerom (Noise protokol) - box nemusí poznať sieťovú topológiu.
 // Box posiela správy cez POST /api/mesh/send na localhoste,
 // a prijíma ich cez GET /api/mesh/inbox/{boxId} (store-and-forward).
 
@@ -70,7 +70,7 @@ func (c *MeshClient) Send(dstHWID string, payload interface{}) error {
 }
 
 // Poll vyzdvihne a vráti správy čakajúce v inboxe tohto boxu.
-// Inbox je vyprázdnený po každom Poll() — správy sú doručené práve raz.
+// Inbox je vyprázdnený po každom Poll() - správy sú doručené práve raz.
 // Vráti prázdny slice ak nie sú žiadne správy.
 func (c *MeshClient) Poll() ([]MeshMessage, error) {
 	resp, err := c.httpClient.Get(
