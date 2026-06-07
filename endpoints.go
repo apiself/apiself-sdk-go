@@ -46,6 +46,35 @@ type BoxInfoDep struct {
 	Rationale string `json:"rationale,omitempty"`
 }
 
+// DepsFromConfig lifts dependencies.boxes[] off a parsed config.json
+// into the BoxInfo wire shape. Saves every box from re-typing the same
+// 4-line slice copy in its BoxInfo closure:
+//
+//	return sdk.BoxInfo{
+//	    ...
+//	    Dependencies: sdk.DepsFromConfig(cfg),
+//	    ...
+//	}
+//
+// Returns nil (not empty slice) when the box has no boxes-deps so the
+// omitempty on BoxInfo.Dependencies actually omits the field.
+func DepsFromConfig(cfg *BoxConfigFile) []BoxInfoDep {
+	if cfg == nil || len(cfg.Dependencies.Boxes) == 0 {
+		return nil
+	}
+	out := make([]BoxInfoDep, 0, len(cfg.Dependencies.Boxes))
+	for _, d := range cfg.Dependencies.Boxes {
+		out = append(out, BoxInfoDep{
+			BoxID:     d.BoxID,
+			Required:  d.Required,
+			Since:     d.Since,
+			Feature:   d.Feature,
+			Rationale: d.Rationale,
+		})
+	}
+	return out
+}
+
 // AuthInfoPublic je verejne exportovateľný subset AuthConfig.
 // Vracia ho /api/info aby si frontend nemusel ťahať z manager-a.
 // Privátne polia (LastSyncedAt, secrets) sa tu nevracajú.
