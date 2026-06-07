@@ -22,6 +22,7 @@ type BoxInfo struct {
 	BrandColor    string                 `json:"brand_color,omitempty"`   // hex brand color from config.json (drives sidebar tint)
 	Category      string                 `json:"category,omitempty"`      // marketplace category from config.json
 	Tagline       string                 `json:"tagline,omitempty"`       // 1-line marketing hook (resolved t:-ref if present)
+	Dependencies  []BoxInfoDep           `json:"dependencies,omitempty"`  // cross-box deps from config.json (SDK UI BoxDependencies reads this)
 	Plan          string                 `json:"plan,omitempty"`          // pôvodný `pln` claim z JWT (free|trial|basic|pro)
 	Tier          string                 `json:"tier,omitempty"`          // CURRENT effective tier (free|basic|pro). Reflektuje runtime downgrade.
 	OriginalTier  string                 `json:"originalTier,omitempty"`  // tier zo zakúpeného JWT - odlíši sa od `Tier` po expirácii
@@ -32,6 +33,17 @@ type BoxInfo struct {
 	MultiUser     bool                   `json:"multiUser"`               // Phase 2: true ak APISELF_AUTH_BOX_URL je nastavené (auth box detekoval Manager)
 	Auth          *AuthInfoPublic        `json:"auth,omitempty"`          // v0.8: auth config (required + box URL + registration mode)
 	Custom        map[string]interface{} `json:"custom,omitempty"`        // box-špecifické extra polia
+}
+
+// BoxInfoDep is one entry in BoxInfo.Dependencies, mirroring config.json
+// `dependencies.boxes[]`. Frontend resolves `feature` / `rationale` `t:`-refs
+// via box locales when rendering.
+type BoxInfoDep struct {
+	BoxID     string `json:"box_id"`
+	Required  bool   `json:"required,omitempty"`
+	Since     string `json:"since,omitempty"`
+	Feature   string `json:"feature,omitempty"`
+	Rationale string `json:"rationale,omitempty"`
 }
 
 // AuthInfoPublic je verejne exportovateľný subset AuthConfig.

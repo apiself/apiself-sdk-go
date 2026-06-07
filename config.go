@@ -48,6 +48,38 @@ type BoxConfigFile struct {
 	// via t: prefix: "t:config.tagline" -> looked up in .apiself/locales/*.json.
 	// Used by the marketplace card + Manager Box Hub tile.
 	Tagline string `json:"tagline,omitempty"`
+
+	// Dependencies - soft cross-box deps declared by the box author.
+	// Lifted off .apiself/config.json's `dependencies.boxes[]` so callers
+	// don't have to re-parse the file. SDK UI BoxDependencies component
+	// reads BoxInfo.Dependencies and auto-renders one card per entry.
+	Dependencies BoxConfigDependencies `json:"dependencies,omitempty"`
+}
+
+// BoxConfigDependencies mirrors the `dependencies` object in config.json.
+// `external` is OS-level (binaries the box wants on PATH); `boxes` is the
+// soft cross-box list used by Dashboard / Box Hub tiles.
+type BoxConfigDependencies struct {
+	External []BoxConfigExternalDep `json:"external,omitempty"`
+	Boxes    []BoxConfigBoxDep      `json:"boxes,omitempty"`
+}
+
+// BoxConfigExternalDep is an OS-level binary the box wants on PATH.
+type BoxConfigExternalDep struct {
+	Name    string   `json:"name"`
+	Version string   `json:"version,omitempty"`
+	OS      []string `json:"os,omitempty"`
+}
+
+// BoxConfigBoxDep is a soft cross-box dependency. `feature` and
+// `rationale` may be raw text or "t:..."-prefixed locale refs - the SDK
+// keeps them as-is, frontend resolves via useI18n().t() when displaying.
+type BoxConfigBoxDep struct {
+	BoxID     string `json:"box_id"`
+	Required  bool   `json:"required,omitempty"`
+	Since     string `json:"since,omitempty"`
+	Feature   string `json:"feature,omitempty"`
+	Rationale string `json:"rationale,omitempty"`
 }
 
 // LoadConfig nacita `.apiself/config.json` zo standardnych cestiek (relativnych
