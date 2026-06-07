@@ -30,6 +30,24 @@ type BoxConfigFile struct {
 	Author      string `json:"author,omitempty"`
 	Runtime     string `json:"runtime,omitempty"`
 	Port        int    `json:"port,omitempty"`
+
+	// BrandColor is an explicit hex like "#14b8a6". When empty, callers fall
+	// back to scraping the first <rect fill="…"> from ui/public/icon.svg
+	// (legacy behaviour preserved by the SDK UI BoxLayout). Explicit value
+	// avoids that regex match and lets stroke-only glyphs still tint the
+	// sidebar consistently.
+	BrandColor string `json:"brand_color,omitempty"`
+
+	// Category groups the box in the marketplace catalogue. Free-form
+	// today (see admin/box_categories table for the recommended enum:
+	// audio, video, storage, communications, ai, developer, productivity,
+	// utility, ...).
+	Category string `json:"category,omitempty"`
+
+	// Tagline is a one-line marketing hook (~60 chars max). Lokalizable
+	// via t: prefix: "t:config.tagline" -> looked up in .apiself/locales/*.json.
+	// Used by the marketplace card + Manager Box Hub tile.
+	Tagline string `json:"tagline,omitempty"`
 }
 
 // LoadConfig nacita `.apiself/config.json` zo standardnych cestiek (relativnych

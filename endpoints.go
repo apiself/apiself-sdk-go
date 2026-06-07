@@ -19,6 +19,9 @@ type BoxInfo struct {
 	Version       string                 `json:"version"`
 	Author        string                 `json:"author,omitempty"`        // z config.json
 	Description   string                 `json:"description,omitempty"`
+	BrandColor    string                 `json:"brand_color,omitempty"`   // hex brand color from config.json (drives sidebar tint)
+	Category      string                 `json:"category,omitempty"`      // marketplace category from config.json
+	Tagline       string                 `json:"tagline,omitempty"`       // 1-line marketing hook (resolved t:-ref if present)
 	Plan          string                 `json:"plan,omitempty"`          // pôvodný `pln` claim z JWT (free|trial|basic|pro)
 	Tier          string                 `json:"tier,omitempty"`          // CURRENT effective tier (free|basic|pro). Reflektuje runtime downgrade.
 	OriginalTier  string                 `json:"originalTier,omitempty"`  // tier zo zakúpeného JWT - odlíši sa od `Tier` po expirácii
