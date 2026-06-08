@@ -58,6 +58,7 @@ func AIModelPath(family, id string, timeout time.Duration) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		addManagerAuth(req)
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -113,8 +114,13 @@ type aiModelStatusEnvelope struct {
 }
 
 func getAIModelStatus(url string) (*aiModelStatus, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	addManagerAuth(req)
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +136,21 @@ func getAIModelStatus(url string) (*aiModelStatus, error) {
 		return nil, fmt.Errorf("status response not success")
 	}
 	return &env.Data, nil
+}
+
+// addManagerAuth forwards the box's session token to the manager so the
+// manager's auth middleware (which gates every /api/* request when a
+// password is set) lets the request through. The token is exported into
+// the box's environment by the supervisor at start time. Boxes never own
+// the token themselves - they just pass through what they were given.
+//
+// Mirrors the same header injection RegisterAIModelProxy does for
+// browser-driven requests. Without it, server-side helpers like
+// AIModelPath() get bounced with 401 every poll.
+func addManagerAuth(req *http.Request) {
+	if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
+		req.Header.Set("X-APISelf-Token", tok)
+	}
 }
 
 // localAIModelPath computes the canonical on-disk path WITHOUT consulting
