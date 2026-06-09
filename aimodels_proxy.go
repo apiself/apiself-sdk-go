@@ -56,6 +56,17 @@ func RegisterAIModelProxy(mux *http.ServeMux) {
 		if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
 			req.Header.Set("X-APISelf-Token", tok)
 		}
+		// Drop the X-Forwarded-For header that Go's httputil.ReverseProxy
+		// auto-populates from the original browser's RemoteAddr. Without
+		// this Manager's detectSourceType sees the browser's LAN IP in
+		// the header and classifies the request as SourceLAN even though
+		// the TCP peer (box -> manager) is on loopback. With LANEnabled
+		// default-off on desktop installs that produces a hard 403
+		// "access denied" the moment the user opens the box UI from any
+		// machine other than the manager host. Box-to-manager is always
+		// a local server-to-server hop; forwarding the browser identity
+		// here serves no purpose and breaks the source classifier.
+		req.Header.Del("X-Forwarded-For")
 		// Path stays /api/ai-models/... - the manager mounts the same
 		// prefix, so no rewrite is needed.
 	}
