@@ -63,6 +63,44 @@ type BoxConfigFile struct {
 	// re-parse config.json on every request. Optional - leave nil for
 	// boxes without any AI-model story.
 	Models *BoxConfigModels `json:"models,omitempty"`
+
+	// Datasets - static asset bundles the box ships (preview MP3s for
+	// the voice catalogue, language data, test corpora, ...). Each
+	// entry is fetched + extracted once into {DataDir}/shared/datasets/<name>/
+	// via sdk.EnsureDataset. See docs/box-ai-catalog-spec.md for the
+	// full contract. Optional - leave nil for boxes that don't ship
+	// any static assets.
+	Datasets []BoxConfigDataset `json:"datasets,omitempty"`
+}
+
+// BoxConfigDataset declares a static asset bundle the box needs at
+// runtime. See docs/box-ai-catalog-spec.md "Datasets" section.
+type BoxConfigDataset struct {
+	// Name is the stable identifier. Becomes the cache directory name
+	// ({DataDir}/shared/datasets/<name>/). Pick a name that includes a
+	// version suffix (e.g. "piper-samples-v1") so a future incompatible
+	// bundle can roll out without invalidating the cache.
+	Name string `json:"name"`
+
+	// URL is the HTTPS URL to the archive. GitHub Release attachments
+	// on the box's mono-repo are the recommended host.
+	URL string `json:"url"`
+
+	// SHA256 is the hex-encoded SHA-256 of the archive (NOT of the
+	// extracted contents). Required - the SDK refuses to extract a
+	// mismatched archive so a poisoned host cannot ship a different
+	// payload than the one config.json pinned.
+	SHA256 string `json:"sha256"`
+
+	// SizeMB is an estimate used by progress UIs. Not enforced.
+	SizeMB int `json:"sizeMb,omitempty"`
+
+	// Archive is the archive format. Supported: "tar.gz" / "tar.bz2" /
+	// "zip". Detected from URL extension; the field is informational.
+	Archive string `json:"archive,omitempty"`
+
+	// Description is a one-line note for human readers of config.json.
+	Description string `json:"description,omitempty"`
 }
 
 // BoxConfigModels declares an AI-model catalogue owned by the box.
