@@ -54,6 +54,99 @@ type BoxConfigFile struct {
 	// don't have to re-parse the file. SDK UI BoxDependencies component
 	// reads BoxInfo.Dependencies and auto-renders one card per entry.
 	Dependencies BoxConfigDependencies `json:"dependencies,omitempty"`
+
+	// Models - AI model catalogue declared by the box. Boxes that ship a
+	// model picker (TTS voices, STT models, LLM weights, ...) put their
+	// preset list here. The SDK ModelStore lifecycle sync at startup
+	// UPSERTs each preset into the box DB so the catalogue UI reads from
+	// one source of truth (the `models` table) instead of having to
+	// re-parse config.json on every request. Optional - leave nil for
+	// boxes without any AI-model story.
+	Models *BoxConfigModels `json:"models,omitempty"`
+}
+
+// BoxConfigModels declares an AI-model catalogue owned by the box.
+//
+// Layout:
+//
+//   - Family / Engine / FileExtension : describe the family the box
+//     downloads into the shared cache. Family is the cache subdirectory
+//     under {DataDir}/shared/ai-models/ - boxes sharing a family
+//     (multiple TTS boxes both consuming piper voices) reuse the same
+//     on-disk files via sdk.EnsureModel.
+//   - UpstreamURL / UpstreamBaseDL : optional - when the box has a live
+//     external catalogue (rhasspy/piper-voices on HuggingFace, the LLM
+//     world's various hub.tx-like indexes), the box-side sync code
+//     fetches UpstreamURL, parses upstream rows, and UPSERTs them into
+//     the models table with source="upstream". UpstreamBaseDL is the
+//     prefix for relative file paths in the upstream feed - typically
+//     "https://huggingface.co/<repo>/resolve/main" so a feed entry
+//     "en/en_US/lessac/medium/en_US-lessac-medium.onnx" resolves to a
+//     full HTTPS URL by simple concatenation.
+//   - Presets : the curated baseline shipped in the box itself. Always
+//     loaded, no network. The UI shows these first so first-run + offline
+//     users can still install something.
+type BoxConfigModels struct {
+	Family         string                 `json:"family"`
+	Engine         string                 `json:"engine,omitempty"`
+	FileExtension  string                 `json:"fileExtension"`
+	UpstreamURL    string                 `json:"upstream_url,omitempty"`
+	UpstreamBaseDL string                 `json:"upstream_base_dl,omitempty"`
+	Presets        []BoxConfigModelPreset `json:"presets,omitempty"`
+}
+
+// BoxConfigModelPreset is one curated model entry. The fields mirror
+// sdk.Model (the DB row shape) so converting one to the other is a flat
+// copy via (c *BoxConfigFile).PresetsAsModels().
+type BoxConfigModelPreset struct {
+	ID                string   `json:"id"`
+	DisplayName       string   `json:"displayName"`
+	URL               string   `json:"url"`
+	CompanionURLs     []string `json:"companionUrls,omitempty"`
+	SizeMB            int      `json:"sizeMb,omitempty"`
+	Languages         []string `json:"languages,omitempty"`
+	Quality           int      `json:"quality,omitempty"`
+	SpeedCPUxRealtime float64  `json:"speedCpuXRealtime,omitempty"`
+	DescriptionShort  string   `json:"descriptionShort,omitempty"`
+	License           string   `json:"license,omitempty"`
+	TierRequired      string   `json:"tierRequired,omitempty"`
+}
+
+// PresetsAsModels converts the config.json preset list into the
+// ModelStore row shape so a box can do:
+//
+//	for _, m := range cfg.PresetsAsModels() { _ = store.Upsert(m) }
+//
+// Family defaults to cfg.Models.Family. TierRequired defaults to "free".
+// Returns an empty slice when cfg.Models is nil.
+func (c *BoxConfigFile) PresetsAsModels() []Model {
+	if c == nil || c.Models == nil {
+		return nil
+	}
+	family := c.Models.Family
+	out := make([]Model, 0, len(c.Models.Presets))
+	for _, p := range c.Models.Presets {
+		tier := p.TierRequired
+		if tier == "" {
+			tier = "free"
+		}
+		out = append(out, Model{
+			ID:                p.ID,
+			Family:            family,
+			Source:            "preset",
+			DisplayName:       p.DisplayName,
+			Languages:         p.Languages,
+			URL:               p.URL,
+			CompanionURLs:     p.CompanionURLs,
+			SizeMB:            p.SizeMB,
+			Quality:           p.Quality,
+			License:           p.License,
+			TierRequired:      tier,
+			DescriptionShort:  p.DescriptionShort,
+			SpeedCPUxRealtime: p.SpeedCPUxRealtime,
+		})
+	}
+	return out
 }
 
 // BoxConfigDependencies mirrors the `dependencies` object in config.json.
