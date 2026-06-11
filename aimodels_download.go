@@ -70,6 +70,24 @@ func EnsureModel(family, id, ext, url string, companionURLs []string, timeout ti
 		return "", fmt.Errorf("EnsureModel: family/id/ext/url all required")
 	}
 
+	// Phase D.2: resolve huggingface:// pseudo-URLs to canonical HF resolve
+	// links before the download path runs. Both the primary URL and any
+	// companions go through the same translation so a box can write all
+	// of its config.json entries in the short form.
+	var err error
+	if url, err = resolveHuggingFaceURL(url); err != nil {
+		return "", fmt.Errorf("EnsureModel: %w", err)
+	}
+	resolvedCompanions := make([]string, 0, len(companionURLs))
+	for _, cu := range companionURLs {
+		r, err := resolveHuggingFaceURL(cu)
+		if err != nil {
+			return "", fmt.Errorf("EnsureModel companion: %w", err)
+		}
+		resolvedCompanions = append(resolvedCompanions, r)
+	}
+	companionURLs = resolvedCompanions
+
 	dataDir := PlatformDataDir()
 	if dataDir == "" {
 		return "", fmt.Errorf("EnsureModel: cannot resolve data dir for this platform")
@@ -209,6 +227,58 @@ func companionDestPath(primaryBase, dest, companionURL string) string {
 		}
 	}
 	return filepath.Join(filepath.Dir(dest), companionBase)
+}
+
+// resolveHuggingFaceURL translates `huggingface://<owner>/<repo>[@<revision>]/<path>`
+// pseudo-URLs to the canonical `https://huggingface.co/<owner>/<repo>/resolve/<revision>/<path>`
+// form. Non-`huggingface://` URLs pass through unchanged so callers can mix
+// raw HTTPS and HF shorthand freely in the same config.json.
+//
+// Phase D.2 (2026-06-11, docs/box-dependency-architecture.md §8). Motivation:
+// pinning revisions inline ("foo@v1") is far easier to read than the
+// canonical "/resolve/v1/" segment buried mid-URL, and a future Phase
+// (cn HF mirror, BYO endpoint, paid HF token) can rewrite the resolver
+// without touching any box config.
+//
+// Syntax:
+//
+//	huggingface://SWivid/F5-TTS/F5TTS_Base/model.safetensors
+//	  → https://huggingface.co/SWivid/F5-TTS/resolve/main/F5TTS_Base/model.safetensors
+//
+//	huggingface://rhasspy/piper-voices@v1.0.0/en/en_US/lessac/medium/foo.onnx
+//	  → https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/foo.onnx
+//
+// Revision defaults to "main" when no `@<rev>` suffix is present, matching
+// the huggingface_hub library default. Owner/repo/path are all required.
+func resolveHuggingFaceURL(url string) (string, error) {
+	const prefix = "huggingface://"
+	if !strings.HasPrefix(url, prefix) {
+		return url, nil
+	}
+	rest := strings.TrimPrefix(url, prefix)
+	// Split into owner / (repo[@revision]) / path  — exactly 3 segments.
+	// Using SplitN keeps slashes inside `path` intact (model files often
+	// sit several levels deep inside HF repos).
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) < 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return "", fmt.Errorf("invalid huggingface:// URL %q: expected owner/repo[@revision]/path", url)
+	}
+	owner := parts[0]
+	repoAndRev := parts[1]
+	path := parts[2]
+	revision := "main"
+	if at := strings.Index(repoAndRev, "@"); at >= 0 {
+		revision = repoAndRev[at+1:]
+		repoAndRev = repoAndRev[:at]
+		if revision == "" {
+			return "", fmt.Errorf("invalid huggingface:// URL %q: empty revision after @", url)
+		}
+	}
+	if repoAndRev == "" {
+		return "", fmt.Errorf("invalid huggingface:// URL %q: empty repo", url)
+	}
+	return fmt.Sprintf("https://huggingface.co/%s/%s/resolve/%s/%s",
+		owner, repoAndRev, revision, path), nil
 }
 
 // downloadFile streams URL to dest. No retry, no resume - one shot.
