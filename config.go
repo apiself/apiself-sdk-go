@@ -195,11 +195,106 @@ type BoxConfigDependencies struct {
 	Boxes    []BoxConfigBoxDep      `json:"boxes,omitempty"`
 }
 
-// BoxConfigExternalDep is an OS-level binary the box wants on PATH.
+// BoxConfigExternalDep is anything external the box needs on disk -
+// a static binary, a portable runtime, a pip/npm dependency tree. Schema
+// per feedback_box_external_deps_schema (memory).
+//
+// Required defaults to true when absent (`*bool` nil) so legacy configs
+// (piper-style entries from 2023-24 without an explicit field) keep
+// behaving as mandatory. New boxes SHOULD set it explicitly for clarity.
 type BoxConfigExternalDep struct {
 	Name    string   `json:"name"`
 	Version string   `json:"version,omitempty"`
 	OS      []string `json:"os,omitempty"`
+
+	// Required gates the install flow. nil = "required (legacy default)";
+	// explicit false = optional / on-demand feature (Pro tier, etc.).
+	Required *bool `json:"required,omitempty"`
+
+	// User-facing labels for the dependency. Both fields may be raw text
+	// or "t:..."-prefixed locale refs; frontend resolves via useI18n().
+	// Required entries leave these empty - the Manager renders them as
+	// just the binary name.
+	Feature   string `json:"feature,omitempty"`
+	Rationale string `json:"rationale,omitempty"`
+
+	// Total download envelope, used by Manager + box UI to render
+	// "Will download ~1.5 GB" confirmations before starting work.
+	SizeMB int `json:"size_mb,omitempty"`
+
+	// TierRequired gates the install endpoint at the box side. Empty =
+	// no tier gate. "basic" / "pro" matches sdk.HasTier(...) semantics.
+	TierRequired string `json:"tier_required,omitempty"`
+
+	// On-demand control plane. For static-binary deps (piper, llama-cpp)
+	// these stay empty - install happens implicitly on first use.
+	// For runtime-style deps the Manager / box UI POSTs to TriggerEndpoint
+	// and polls StatusEndpoint for progress.
+	TriggerEndpoint string `json:"trigger_endpoint,omitempty"`
+	StatusEndpoint  string `json:"status_endpoint,omitempty"`
+
+	// Per-platform download map. Keys: "os-arch" tuples ("windows-amd64",
+	// "darwin-arm64", ...). Empty for engines whose binary set is
+	// computed differently (pure pip / npm deps without a base runtime).
+	Downloads map[string]BoxConfigExternalDownload `json:"downloads,omitempty"`
+
+	// Python engines: pip-installed wheels with per-package progress.
+	PipPackages   []BoxConfigPipPackage `json:"pip_packages,omitempty"`
+	PipExtraIndex string                `json:"pip_extra_index,omitempty"`
+
+	// Node engines: parallel shape to PipPackages.
+	NpmPackages []BoxConfigNpmPackage `json:"npm_packages,omitempty"`
+}
+
+// IsRequired returns whether the dependency must succeed before the box
+// can run. nil-pointer field defaults to true (legacy behaviour).
+func (d *BoxConfigExternalDep) IsRequired() bool {
+	if d == nil || d.Required == nil {
+		return true
+	}
+	return *d.Required
+}
+
+// BoxConfigExternalDownload describes one platform-specific download
+// artifact for a BoxConfigExternalDep. Archive format hints the install
+// helper which extractor to use ("tar.gz-tree", "zip-dir", "deb", ...).
+type BoxConfigExternalDownload struct {
+	URL     string `json:"url"`
+	Archive string `json:"archive,omitempty"`
+	Inner   string `json:"inner,omitempty"`
+	Binary  string `json:"binary,omitempty"`
+	SizeMB  int    `json:"size_mb,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
+}
+
+// BoxConfigPipPackage is one entry in a Python engine's install plan.
+// Display + SizeMB drive the per-package progress UI while pip resolves
+// the wheel tree.
+type BoxConfigPipPackage struct {
+	Spec    string `json:"spec"`              // pip requirement spec ("torch==2.4.0")
+	Display string `json:"display,omitempty"` // human label ("PyTorch 2.4.0 (CPU)")
+	SizeMB  int    `json:"size_mb,omitempty"` // rough wheel + transitive deps size
+}
+
+// BoxConfigNpmPackage mirrors BoxConfigPipPackage for Node engines.
+type BoxConfigNpmPackage struct {
+	Spec    string `json:"spec"`
+	Display string `json:"display,omitempty"`
+	SizeMB  int    `json:"size_mb,omitempty"`
+}
+
+// FindExternalDep returns the entry for the given dep name, or nil when
+// the box doesn't declare it. Helper to keep box main.go terse.
+func (c *BoxConfigFile) FindExternalDep(name string) *BoxConfigExternalDep {
+	if c == nil {
+		return nil
+	}
+	for i := range c.Dependencies.External {
+		if c.Dependencies.External[i].Name == name {
+			return &c.Dependencies.External[i]
+		}
+	}
+	return nil
 }
 
 // BoxConfigBoxDep is a soft cross-box dependency. `feature` and
