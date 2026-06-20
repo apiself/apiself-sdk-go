@@ -168,6 +168,15 @@ func (s *AgentStore) SeedFromFile(path string) (crossBoxTools []string, systemPr
 		}
 	}
 
+	// Ulož cross-box allowlist + extra system prompt do settings, aby ich
+	// UI dostalo cez jeden /api/agents/settings fetch (netreba parsovať
+	// agents.json na klientovi).
+	cbJSON, _ := json.Marshal(f.CrossBoxTools)
+	_, _ = s.db.Exec(`INSERT INTO agent_settings (key, value) VALUES ('cross_box_tools', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, string(cbJSON))
+	_, _ = s.db.Exec(`INSERT INTO agent_settings (key, value) VALUES ('system_prompt_extra', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, f.SystemPromptExtra)
+
 	// GC: seed agenti ktorí už nie sú v agents.json (user agentov sa
 	// nedotkneme). Ak je agents.json prázdny, GC preskočíme - skoro
 	// určite parsing bug, nie zámer zmazať všetkých.
@@ -368,4 +377,25 @@ func (s *AgentStore) SetMaxIterations(n int) error {
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 		strconv.Itoa(n))
 	return err
+}
+
+// CrossBoxTools vráti allowlist boxov ktorých tools agenti smú volať
+// (uložené pri SeedFromFile). Prázdne ak box agentov nemá / žiadny cross-box.
+func (s *AgentStore) CrossBoxTools() []string {
+	var v string
+	if s.db.QueryRow(`SELECT value FROM agent_settings WHERE key = 'cross_box_tools'`).Scan(&v) != nil {
+		return nil
+	}
+	var out []string
+	if json.Unmarshal([]byte(v), &out) != nil {
+		return nil
+	}
+	return out
+}
+
+// SystemPromptExtra vráti box-špecifický dodatok k system promptu agenta.
+func (s *AgentStore) SystemPromptExtra() string {
+	var v string
+	_ = s.db.QueryRow(`SELECT value FROM agent_settings WHERE key = 'system_prompt_extra'`).Scan(&v)
+	return v
 }

@@ -180,7 +180,11 @@ func (h *agentHandlers) runByID(w http.ResponseWriter, r *http.Request) {
 func (h *agentHandlers) settings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		h.ok(w, map[string]any{"maxIterations": h.store.MaxIterations()})
+		h.ok(w, map[string]any{
+			"maxIterations":     h.store.MaxIterations(),
+			"crossBoxTools":     h.store.CrossBoxTools(),
+			"systemPromptExtra": h.store.SystemPromptExtra(),
+		})
 	case http.MethodPut:
 		var body struct {
 			MaxIterations int `json:"maxIterations"`
