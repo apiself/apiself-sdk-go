@@ -70,6 +70,23 @@ func InitAudit(db *sql.DB) error {
 	return nil
 }
 
+// InitAuditDefault otvorí (alebo vytvorí) dedikovanú audit DB boxu na
+// {BoxDataDir}/db/audit.db a zaregistruje ju. Použi pre boxy ktoré nemajú
+// vlastnú SQLite - sprístupní Aktivita tab všade s nulovým DB plumbingom.
+// Boxy s vlastnou DB môžu radšej zavolať InitAudit(rawDB) a ušetriť druhý
+// súbor. Volaj raz pri štarte.
+func InitAuditDefault(boxID string) error {
+	path, err := BoxDBPath(boxID, "audit.db")
+	if err != nil {
+		return fmt.Errorf("InitAuditDefault: %w", err)
+	}
+	db, err := OpenBoxSQLite(path, nil)
+	if err != nil {
+		return fmt.Errorf("InitAuditDefault: %w", err)
+	}
+	return InitAudit(db)
+}
+
 // Audit pripíše jednu udalosť. Best-effort: zlyhaný zápis (alebo
 // neinicializovaný audit) sa ticho ignoruje - chýbajúci audit záznam nesmie
 // nikdy rozbiť operáciu, ktorú audituje.
