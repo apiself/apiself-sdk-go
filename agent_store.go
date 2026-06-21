@@ -27,7 +27,22 @@ import (
 	"time"
 )
 
+// AgentParam je jedno vstupné pole agenta (v2). Vyrenderuje sa ako
+// formulár pred behom; hodnota sa vloží do user správy.
+type AgentParam struct {
+	Key         string   `json:"key"`
+	Label       string   `json:"label"`             // raw text alebo t: key
+	Type        string   `json:"type"`              // string | number | boolean | enum
+	Required    bool     `json:"required,omitempty"`
+	Options     []string `json:"options,omitempty"` // pre type=enum
+	Placeholder string   `json:"placeholder,omitempty"`
+}
+
 // Agent je jeden uložený recept (seed alebo user-created).
+//
+// v1 polia (label/prompt/icon/tier) sú DB stĺpce; v2 polia
+// (description..params) sa serializujú do `definition` JSON stĺpca - viď
+// spec §16. Spätná kompatibilita: starý riadok = prázdne v2 polia.
 type Agent struct {
 	ID        string `json:"id"`
 	Source    string `json:"source"` // "seed" | "user"
@@ -36,8 +51,50 @@ type Agent struct {
 	Icon      string `json:"icon,omitempty"`
 	Tier      string `json:"tier"` // "free" | "basic" | "pro"
 	SortOrder int    `json:"sortOrder"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+
+	// ── v2 (definition JSON) ──
+	Description   string       `json:"description,omitempty"`   // human popis, nikdy do LLM
+	Instructions  string       `json:"instructions,omitempty"`  // per-agent system prompt
+	Tools         []string     `json:"tools,omitempty"`         // allowlist operationId; [] = všetky vlastné
+	CrossBoxTools []string     `json:"crossBoxTools,omitempty"` // ktoré iné boxy smie volať
+	Model         string       `json:"model,omitempty"`         // pin modelu; "" = user výber
+	Params        []AgentParam `json:"params,omitempty"`        // vstupný formulár
+
+	CreatedAt int64 `json:"createdAt"`
+	UpdatedAt int64 `json:"updatedAt"`
+}
+
+// agentDefinition je v2 časť agenta uložená v `definition` JSON stĺpci.
+type agentDefinition struct {
+	Description   string       `json:"description,omitempty"`
+	Instructions  string       `json:"instructions,omitempty"`
+	Tools         []string     `json:"tools,omitempty"`
+	CrossBoxTools []string     `json:"crossBoxTools,omitempty"`
+	Model         string       `json:"model,omitempty"`
+	Params        []AgentParam `json:"params,omitempty"`
+}
+
+func (a *Agent) definitionJSON() string {
+	d := agentDefinition{
+		Description: a.Description, Instructions: a.Instructions,
+		Tools: a.Tools, CrossBoxTools: a.CrossBoxTools,
+		Model: a.Model, Params: a.Params,
+	}
+	b, _ := json.Marshal(d)
+	return string(b)
+}
+
+func (a *Agent) applyDefinition(raw string) {
+	if raw == "" {
+		return
+	}
+	var d agentDefinition
+	if json.Unmarshal([]byte(raw), &d) != nil {
+		return
+	}
+	a.Description, a.Instructions = d.Description, d.Instructions
+	a.Tools, a.CrossBoxTools = d.Tools, d.CrossBoxTools
+	a.Model, a.Params = d.Model, d.Params
 }
 
 // AgentRun je jeden záznam spustenia (audit / re-run).
@@ -73,6 +130,13 @@ type agentSeedRow struct {
 	Prompt string `json:"prompt"`
 	Icon   string `json:"icon,omitempty"`
 	Tier   string `json:"tier,omitempty"`
+	// v2
+	Description   string       `json:"description,omitempty"`
+	Instructions  string       `json:"instructions,omitempty"`
+	Tools         []string     `json:"tools,omitempty"`
+	CrossBoxTools []string     `json:"crossBoxTools,omitempty"`
+	Model         string       `json:"model,omitempty"`
+	Params        []AgentParam `json:"params,omitempty"`
 }
 
 // NewAgentStore vytvorí tabuľky ak chýbajú a vráti helper.
@@ -89,6 +153,7 @@ func NewAgentStore(db *sql.DB) (*AgentStore, error) {
 			icon        TEXT NOT NULL DEFAULT '',
 			tier        TEXT NOT NULL DEFAULT 'free',
 			sort_order  INTEGER NOT NULL DEFAULT 0,
+			definition  TEXT NOT NULL DEFAULT '{}',
 			created_at  INTEGER NOT NULL,
 			updated_at  INTEGER NOT NULL
 		);
@@ -113,6 +178,12 @@ func NewAgentStore(db *sql.DB) (*AgentStore, error) {
 		);
 	`); err != nil {
 		return nil, fmt.Errorf("AgentStore: migrate: %w", err)
+	}
+	// v2 upgrade pre staré DB (agents tabuľka bez definition stĺpca).
+	// "duplicate column name" znamená že už existuje - ignorujeme.
+	if _, err := db.Exec(`ALTER TABLE agents ADD COLUMN definition TEXT NOT NULL DEFAULT '{}'`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return nil, fmt.Errorf("AgentStore: migrate v2: %w", err)
 	}
 	return &AgentStore{db: db}, nil
 }
@@ -151,18 +222,24 @@ func (s *AgentStore) SeedFromFile(path string) (crossBoxTools []string, systemPr
 		if tier == "" {
 			tier = "free"
 		}
+		def := (&Agent{
+			Description: a.Description, Instructions: a.Instructions,
+			Tools: a.Tools, CrossBoxTools: a.CrossBoxTools,
+			Model: a.Model, Params: a.Params,
+		}).definitionJSON()
 		if _, err := s.db.Exec(`
-			INSERT INTO agents (id, source, label, prompt, icon, tier, sort_order, created_at, updated_at)
-			VALUES (?, 'seed', ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO agents (id, source, label, prompt, icon, tier, sort_order, definition, created_at, updated_at)
+			VALUES (?, 'seed', ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				label      = excluded.label,
 				prompt     = excluded.prompt,
 				icon       = excluded.icon,
 				tier       = excluded.tier,
 				sort_order = excluded.sort_order,
+				definition = excluded.definition,
 				updated_at = excluded.updated_at
 			WHERE agents.source = 'seed'`,
-			a.ID, a.Label, a.Prompt, a.Icon, tier, i, now, now,
+			a.ID, a.Label, a.Prompt, a.Icon, tier, i, def, now, now,
 		); err != nil {
 			return nil, "", fmt.Errorf("AgentStore.SeedFromFile: upsert %s: %w", a.ID, err)
 		}
@@ -206,7 +283,7 @@ func (s *AgentStore) SeedFromFile(path string) (crossBoxTools []string, systemPr
 // druhé (podľa created_at). UI ich renderuje ako tlačidlá.
 func (s *AgentStore) ListAgents() ([]Agent, error) {
 	rows, err := s.db.Query(`
-		SELECT id, source, label, prompt, icon, tier, sort_order, created_at, updated_at
+		SELECT id, source, label, prompt, icon, tier, sort_order, definition, created_at, updated_at
 		  FROM agents
 		 ORDER BY
 		   CASE source WHEN 'seed' THEN 0 ELSE 1 END,
@@ -219,47 +296,54 @@ func (s *AgentStore) ListAgents() ([]Agent, error) {
 	out := []Agent{}
 	for rows.Next() {
 		var a Agent
+		var def string
 		if err := rows.Scan(&a.ID, &a.Source, &a.Label, &a.Prompt, &a.Icon,
-			&a.Tier, &a.SortOrder, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&a.Tier, &a.SortOrder, &def, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
+		a.applyDefinition(def)
 		out = append(out, a)
 	}
 	return out, rows.Err()
 }
 
-// CreateUserAgent vytvorí user agenta. ID sa vygeneruje (user nezadáva).
-func (s *AgentStore) CreateUserAgent(label, prompt, icon, tier string) (*Agent, error) {
-	if strings.TrimSpace(label) == "" || strings.TrimSpace(prompt) == "" {
+// CreateUserAgent vytvorí user agenta z v2 definície. ID sa vygeneruje
+// (user nezadáva); source/timestamps sa nastavia interne.
+func (s *AgentStore) CreateUserAgent(a Agent) (*Agent, error) {
+	if strings.TrimSpace(a.Label) == "" || strings.TrimSpace(a.Prompt) == "" {
 		return nil, fmt.Errorf("AgentStore.CreateUserAgent: label and prompt required")
 	}
-	if tier == "" {
-		tier = "free"
+	if a.Tier == "" {
+		a.Tier = "free"
 	}
 	now := time.Now().Unix()
-	id := "user-" + newInstanceID()
+	a.ID = "user-" + newInstanceID()
+	a.Source = "user"
+	a.CreatedAt, a.UpdatedAt = now, now
 	if _, err := s.db.Exec(`
-		INSERT INTO agents (id, source, label, prompt, icon, tier, sort_order, created_at, updated_at)
-		VALUES (?, 'user', ?, ?, ?, ?, 0, ?, ?)`,
-		id, label, prompt, icon, tier, now, now,
+		INSERT INTO agents (id, source, label, prompt, icon, tier, sort_order, definition, created_at, updated_at)
+		VALUES (?, 'user', ?, ?, ?, ?, 0, ?, ?, ?)`,
+		a.ID, a.Label, a.Prompt, a.Icon, a.Tier, a.definitionJSON(), now, now,
 	); err != nil {
 		return nil, err
 	}
-	return &Agent{ID: id, Source: "user", Label: label, Prompt: prompt,
-		Icon: icon, Tier: tier, CreatedAt: now, UpdatedAt: now}, nil
+	return &a, nil
 }
 
-// UpdateUserAgent upraví user agenta. Seed agentov nemodifikuje (vráti
-// chybu - tie sa menia len cez agents.json).
-func (s *AgentStore) UpdateUserAgent(id, label, prompt, icon, tier string) error {
-	if tier == "" {
-		tier = "free"
+// UpdateUserAgent upraví user agenta z v2 definície. Seed agentov
+// nemodifikuje (vráti chybu - tie sa menia len cez agents.json).
+func (s *AgentStore) UpdateUserAgent(id string, a Agent) error {
+	if strings.TrimSpace(a.Label) == "" || strings.TrimSpace(a.Prompt) == "" {
+		return fmt.Errorf("AgentStore.UpdateUserAgent: label and prompt required")
+	}
+	if a.Tier == "" {
+		a.Tier = "free"
 	}
 	res, err := s.db.Exec(`
 		UPDATE agents
-		   SET label = ?, prompt = ?, icon = ?, tier = ?, updated_at = ?
+		   SET label = ?, prompt = ?, icon = ?, tier = ?, definition = ?, updated_at = ?
 		 WHERE id = ? AND source = 'user'`,
-		label, prompt, icon, tier, time.Now().Unix(), id)
+		a.Label, a.Prompt, a.Icon, a.Tier, a.definitionJSON(), time.Now().Unix(), id)
 	if err != nil {
 		return err
 	}

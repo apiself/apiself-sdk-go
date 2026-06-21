@@ -64,17 +64,12 @@ func (h *agentHandlers) agents(w http.ResponseWriter, r *http.Request) {
 		}
 		h.ok(w, map[string]any{"agents": list})
 	case http.MethodPost:
-		var body struct {
-			Label  string `json:"label"`
-			Prompt string `json:"prompt"`
-			Icon   string `json:"icon"`
-			Tier   string `json:"tier"`
-		}
+		var body Agent
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			h.fail(w, http.StatusBadRequest, "invalid body")
 			return
 		}
-		a, err := h.store.CreateUserAgent(body.Label, body.Prompt, body.Icon, body.Tier)
+		a, err := h.store.CreateUserAgent(body)
 		if err != nil {
 			h.fail(w, http.StatusBadRequest, err.Error())
 			return
@@ -94,17 +89,12 @@ func (h *agentHandlers) agentByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
-		var body struct {
-			Label  string `json:"label"`
-			Prompt string `json:"prompt"`
-			Icon   string `json:"icon"`
-			Tier   string `json:"tier"`
-		}
+		var body Agent
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			h.fail(w, http.StatusBadRequest, "invalid body")
 			return
 		}
-		if err := h.store.UpdateUserAgent(id, body.Label, body.Prompt, body.Icon, body.Tier); err != nil {
+		if err := h.store.UpdateUserAgent(id, body); err != nil {
 			h.fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
