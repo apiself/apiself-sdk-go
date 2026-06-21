@@ -147,7 +147,44 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
+
+	// SSE / streaming odpovede (napr. llm box /v1/chat/completions
+	// stream:true) musíme flushovať per-chunk, inak io.Copy bufferuje a
+	// klient dostane celú odpoveď naraz na konci (streaming "nefunguje").
+	if isStreaming(resp.Header) {
+		copyFlushing(w, resp.Body)
+		return
+	}
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func isStreaming(h http.Header) bool {
+	ct := h.Get("Content-Type")
+	return strings.HasPrefix(ct, "text/event-stream") ||
+		strings.Contains(ct, "application/x-ndjson") ||
+		h.Get("X-Accel-Buffering") == "no"
+}
+
+// copyFlushing kopíruje stream a flushuje po každom chunk-u (ak je
+// ResponseWriter http.Flusher). Tým sa SSE delty dostanú ku klientovi
+// priebežne namiesto naraz.
+func copyFlushing(w http.ResponseWriter, r io.Reader) {
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func copyRequestHeaders(dst, src http.Header) {
