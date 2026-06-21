@@ -31,8 +31,8 @@ import (
 // formulár pred behom; hodnota sa vloží do user správy.
 type AgentParam struct {
 	Key         string   `json:"key"`
-	Label       string   `json:"label"`             // raw text alebo t: key
-	Type        string   `json:"type"`              // string | number | boolean | enum
+	Label       string   `json:"label"` // raw text alebo t: key
+	Type        string   `json:"type"`  // string | number | boolean | enum
 	Required    bool     `json:"required,omitempty"`
 	Options     []string `json:"options,omitempty"` // pre type=enum
 	Placeholder string   `json:"placeholder,omitempty"`
@@ -482,4 +482,29 @@ func (s *AgentStore) SystemPromptExtra() string {
 	var v string
 	_ = s.db.QueryRow(`SELECT value FROM agent_settings WHERE key = 'system_prompt_extra'`).Scan(&v)
 	return v
+}
+
+// DefaultSystemPrompt je východzie základné správanie asistenta (tool-use +
+// anti-halucinácia). Editovateľné cez SetSystemPrompt; UI ho ukáže ako
+// default v nastaveniach asistenta.
+const DefaultSystemPrompt = "You are an assistant embedded in this app. You have tools that call the app's real API. " +
+	"ALWAYS call the matching tool to read or change data — never invent, assume or guess data " +
+	"(lists, counts, statuses, names, IDs). Base every factual statement ONLY on a tool result. " +
+	"If a question needs data, call the tool first, then answer from what it returned. " +
+	"Prefer the fewest tool calls needed. Respond in the user's language."
+
+// SystemPrompt vráti uložený základný system prompt alebo default.
+func (s *AgentStore) SystemPrompt() string {
+	var v string
+	if s.db.QueryRow(`SELECT value FROM agent_settings WHERE key = 'system_prompt'`).Scan(&v) == nil && strings.TrimSpace(v) != "" {
+		return v
+	}
+	return DefaultSystemPrompt
+}
+
+// SetSystemPrompt uloží základný system prompt. Prázdny = reset na default.
+func (s *AgentStore) SetSystemPrompt(p string) error {
+	_, err := s.db.Exec(`INSERT INTO agent_settings (key, value) VALUES ('system_prompt', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, p)
+	return err
 }

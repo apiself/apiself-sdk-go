@@ -171,23 +171,37 @@ func (h *agentHandlers) settings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		h.ok(w, map[string]any{
-			"maxIterations":     h.store.MaxIterations(),
-			"crossBoxTools":     h.store.CrossBoxTools(),
-			"systemPromptExtra": h.store.SystemPromptExtra(),
+			"maxIterations":       h.store.MaxIterations(),
+			"crossBoxTools":       h.store.CrossBoxTools(),
+			"systemPromptExtra":   h.store.SystemPromptExtra(),
+			"systemPrompt":        h.store.SystemPrompt(),
+			"defaultSystemPrompt": DefaultSystemPrompt,
 		})
 	case http.MethodPut:
 		var body struct {
-			MaxIterations int `json:"maxIterations"`
+			MaxIterations *int    `json:"maxIterations"`
+			SystemPrompt  *string `json:"systemPrompt"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			h.fail(w, http.StatusBadRequest, "invalid body")
 			return
 		}
-		if err := h.store.SetMaxIterations(body.MaxIterations); err != nil {
-			h.fail(w, http.StatusInternalServerError, err.Error())
-			return
+		if body.MaxIterations != nil {
+			if err := h.store.SetMaxIterations(*body.MaxIterations); err != nil {
+				h.fail(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
-		h.ok(w, map[string]any{"maxIterations": h.store.MaxIterations()})
+		if body.SystemPrompt != nil {
+			if err := h.store.SetSystemPrompt(*body.SystemPrompt); err != nil {
+				h.fail(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		h.ok(w, map[string]any{
+			"maxIterations": h.store.MaxIterations(),
+			"systemPrompt":  h.store.SystemPrompt(),
+		})
 	default:
 		h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
