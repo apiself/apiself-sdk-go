@@ -26,7 +26,21 @@ import (
 //	        Endpoints: sdk.EndpointsFromSwagger(),
 //	    }
 //	})
-func EndpointsFromSwagger() []string {
+// swaggerBytes returns the raw contents of the box's `.apiself/swagger.json`
+// from the first candidate path that exists (cwd, parent, exe-dir). Cached
+// after the first successful read. Nil if not found / empty.
+//
+// Used both by EndpointsFromSwagger (for /api/info) and by the /swagger.json
+// route (RegisterRequiredEndpoints) - the Box Agent Panel fetches the latter
+// to turn the box's own API into agent tools, so it MUST be served as JSON
+// (without it the SPA catch-all returns index.html, tool assembly fails, and
+// the AI assistant has no tools and hallucinates answers).
+var swaggerCache []byte
+
+func swaggerBytes() []byte {
+	if swaggerCache != nil {
+		return swaggerCache
+	}
 	candidates := []string{
 		filepath.Join(".apiself", "swagger.json"),
 		filepath.Join("..", ".apiself", "swagger.json"),
@@ -38,14 +52,17 @@ func EndpointsFromSwagger() []string {
 			filepath.Join(dir, "..", ".apiself", "swagger.json"),
 		)
 	}
-
-	var data []byte
 	for _, p := range candidates {
 		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
-			data = b
-			break
+			swaggerCache = b
+			return b
 		}
 	}
+	return nil
+}
+
+func EndpointsFromSwagger() []string {
+	data := swaggerBytes()
 	if data == nil {
 		return nil
 	}

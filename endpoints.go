@@ -167,6 +167,23 @@ func RegisterRequiredEndpoints(mux *http.ServeMux, infoFn func() BoxInfo) {
 		}
 		writeAPI(w, http.StatusOK, info)
 	})
+
+	// Serve the box's own OpenAPI/swagger as JSON. The Box Agent Panel
+	// (SDK UI) fetches GET /swagger.json to turn this box's API into agent
+	// tools. Without an explicit route the SPA catch-all returns index.html,
+	// so tool assembly silently fails and the AI assistant runs with zero
+	// tools (it then hallucinates answers instead of calling real endpoints).
+	mux.HandleFunc("/swagger.json", func(w http.ResponseWriter, r *http.Request) {
+		data := swaggerBytes()
+		if data == nil {
+			http.Error(w, `{"error":"swagger.json not found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	})
 }
 
 // writeAPI je miniwrap pre konzistentný `{success, data}` envelope
