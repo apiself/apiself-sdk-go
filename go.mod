@@ -6,6 +6,7 @@ require (
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/nicksnyder/go-i18n/v2 v2.6.1
+	golang.design/x/hotkey v0.4.1
 	golang.org/x/text v0.36.0
 	modernc.org/sqlite v1.52.0
 )
