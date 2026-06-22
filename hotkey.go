@@ -80,6 +80,21 @@ func NewHotkeyStore(db *sql.DB) (*HotkeyStore, error) {
 	}, nil
 }
 
+// NewHotkeyStoreDefault otvorí (alebo vytvorí) dedikovanú DB na
+// {BoxDataDir}/db/hotkeys.db a vráti store. Pre boxy bez vlastnej SQLite
+// (napr. recorder) - nulový DB plumbing.
+func NewHotkeyStoreDefault(boxID string) (*HotkeyStore, error) {
+	path, err := BoxDBPath(boxID, "hotkeys.db")
+	if err != nil {
+		return nil, fmt.Errorf("NewHotkeyStoreDefault: %w", err)
+	}
+	db, err := OpenBoxSQLite(path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("NewHotkeyStoreDefault: %w", err)
+	}
+	return NewHotkeyStore(db)
+}
+
 // RegisterAction deklaruje akciu + jej handler. Volaj pred Start().
 func (s *HotkeyStore) RegisterAction(id, label string, handler func()) {
 	s.mu.Lock()
