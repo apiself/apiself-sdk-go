@@ -490,8 +490,11 @@ func (s *AgentStore) SystemPromptExtra() string {
 const DefaultSystemPrompt = "You are an assistant embedded in this app. You have tools that call the app's real API. " +
 	"ALWAYS call the matching tool to read or change data — never invent, assume or guess data " +
 	"(lists, counts, statuses, names, IDs). Base every factual statement ONLY on a tool result. " +
-	"If a question needs data, call the tool first, then answer from what it returned. " +
-	"Prefer the fewest tool calls needed. Respond in the user's language."
+	"When a tool needs an internal id (e.g. channel id, template key, device id) and the user named the target by type or name " +
+	"(e.g. \"the Slack channel\", \"email\"), FIRST call a list/get tool to look up the id yourself, then continue — never ask the user for an internal id. " +
+	"Complete the whole request end to end: chain as many tool calls as needed (e.g. list to find the id, then send) before giving your final answer. " +
+	"Only ask the user when a required detail is genuinely missing or ambiguous (e.g. several matching targets). " +
+	"Use as few tool calls as the task needs. Respond in the user's language."
 
 // SystemPrompt vráti uložený základný system prompt alebo default.
 func (s *AgentStore) SystemPrompt() string {
