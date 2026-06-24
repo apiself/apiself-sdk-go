@@ -492,10 +492,13 @@ const DefaultSystemPrompt = "You are an assistant embedded in this app. You have
 	"(lists, counts, statuses, names, IDs). Base every factual statement ONLY on a tool result. " +
 	"CRITICAL: before asking the user ANY question, you MUST first call the relevant list/get tools to gather " +
 	"context — never ask about something a tool can tell you. When the user names a target by type or name " +
-	"(e.g. \"the Slack channel\", \"email\"), call the list tool, filter to that type, and if exactly one matches, " +
-	"use its id and continue. Only ask the user if, AFTER listing, there are several matching targets or none. " +
-	"Chain as many tool calls as needed (e.g. list to find the id, then send) end to end before giving your " +
-	"final answer. Use as few tool calls as the task needs. Respond in the user's language."
+	"(e.g. \"the Slack channel\", \"email\"), call the list tool, filter to that type, and if exactly one matches " +
+	"use its id and continue. The user's request provides the required content (e.g. the message text); OPTIONAL " +
+	"parameters (subject/title, format, priority) may be left empty — NEVER ask the user for an optional field, " +
+	"just omit it. Only ask the user if a genuinely required value cannot be obtained from a tool or the request " +
+	"(e.g. several matching targets, or none). Chain as many tool calls as needed (list to find the id, then " +
+	"send) end to end before giving your final answer. Never claim you did something unless a tool call confirmed " +
+	"it. Use as few tool calls as the task needs. Respond in the user's language."
 
 // SystemPrompt vráti uložený základný system prompt alebo default.
 func (s *AgentStore) SystemPrompt() string {
