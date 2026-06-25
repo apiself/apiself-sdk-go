@@ -57,6 +57,13 @@ var (
 
 func cachedBoxID() string {
 	boxIDOnce.Do(func() {
+		// Prefer the env var the Manager injects when spawning the box — it's
+		// always present and doesn't depend on the process cwd (config-file
+		// lookup can miss, which silently dropped the caller header).
+		if v := os.Getenv("APISELF_BOX_ID"); v != "" {
+			boxIDVal = v
+			return
+		}
 		if cfg, err := LoadConfig(); err == nil {
 			boxIDVal = cfg.ID
 		}
