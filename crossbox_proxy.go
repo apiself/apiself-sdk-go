@@ -38,12 +38,31 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 )
 
 const (
 	crossBoxProxyBoxPrefix     = "/api/cb/proxy/box-"
 	crossBoxProxyManagerPrefix = "/api/cb/proxy/manager/"
 )
+
+// cachedBoxID returns this box's own ID (from .apiself/config.json), loaded
+// once. Used to stamp the X-APISelf-Caller-Box header so callee boxes can
+// attribute a cross-box request to the originating box (e.g. the LLM box
+// logging which box's AI assistant called it).
+var (
+	boxIDOnce sync.Once
+	boxIDVal  string
+)
+
+func cachedBoxID() string {
+	boxIDOnce.Do(func() {
+		if cfg, err := LoadConfig(); err == nil {
+			boxIDVal = cfg.ID
+		}
+	})
+	return boxIDVal
+}
 
 // RegisterCrossBoxProxy installs the proxy route on the given mux.
 // TWO upstream targets are supported:
@@ -102,6 +121,12 @@ func crossBoxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	req.ContentLength = r.ContentLength
 	copyRequestHeaders(req.Header, r.Header)
 	req.Header.Del("Authorization") // never forward; Manager injects identity
+	// Stamp the calling box's ID so the callee can attribute the request
+	// (e.g. LLM box usage shows which box's AI assistant called it). The
+	// Manager's reverse proxy forwards this header to the target box.
+	if id := cachedBoxID(); id != "" {
+		req.Header.Set("X-APISelf-Caller-Box", id)
+	}
 	// Strip reverse-proxy-only headers. Caddy/nginx infront of the Manager
 	// set these so the FIRST hop (user -> Manager) is correctly classified as
 	// Remote. But this SECOND hop (box -> Manager loopback) is genuinely a
