@@ -137,6 +137,27 @@ func (h *agentHandlers) runs(w http.ResponseWriter, r *http.Request) {
 			h.fail(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// Mirror the run into the standard activity audit so it appears in the
+		// box's "Activity" tab (the agent's own run history is a separate store).
+		// PII-safe: log who/status/model + step count, never the user's prompt
+		// or the tool results.
+		target := run.AgentID
+		if target == "" {
+			target = "free"
+		}
+		steps := 0
+		if run.StepsJSON != "" {
+			var arr []json.RawMessage
+			if json.Unmarshal([]byte(run.StepsJSON), &arr) == nil {
+				steps = len(arr)
+			}
+		}
+		detail := run.Status
+		if run.ModelUsed != "" {
+			detail += " · " + run.ModelUsed
+		}
+		detail += " · " + strconv.Itoa(steps) + " steps"
+		Audit("agent.run", target, detail)
 		h.ok(w, map[string]any{"id": id})
 	default:
 		h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
