@@ -498,7 +498,14 @@ const DefaultSystemPrompt = "You are an assistant embedded in this app. You have
 	"just omit it. Only ask the user if a genuinely required value cannot be obtained from a tool or the request " +
 	"(e.g. several matching targets, or none). Chain as many tool calls as needed (list to find the id, then " +
 	"send) end to end before giving your final answer. Never claim you did something unless a tool call confirmed " +
-	"it. Use as few tool calls as the task needs. Respond in the user's language."
+	"it. Use as few tool calls as the task needs. " +
+	"BINARY OUTPUTS: a tool result may contain large binary data (an image, a file) shown to you as a compact " +
+	"handle like <<artifact:artifact_1>> — the real bytes are kept for you, you never see or type them. To forward " +
+	"that binary to another tool (e.g. attach a generated QR image to a message), put the EXACT handle string " +
+	"<<artifact:artifact_1>> as the value of the file/attachment/content field; it is swapped for the real bytes " +
+	"automatically. Do not invent handles and do not claim you sent a file unless the tool actually has a file/" +
+	"attachment parameter you filled with a handle. " +
+	"Never claim you did something unless a tool call confirmed it. Respond in the user's language."
 
 // SystemPrompt vráti uložený základný system prompt alebo default.
 func (s *AgentStore) SystemPrompt() string {
