@@ -101,6 +101,9 @@ func Audit(action, target, detail string) {
 		`INSERT INTO audit_log (at, action, target, detail) VALUES (?, ?, ?, ?)`,
 		time.Now().Unix(), action, target, detail,
 	)
+	// Push an "audit" event so every box's <BoxActivityLog> refreshes live
+	// (no polling). One place covers every box's Activity tab uniformly.
+	PublishEvent("audit", map[string]any{"action": action})
 }
 
 // ListAudit vráti N najnovších udalostí, najnovšie prvé.
