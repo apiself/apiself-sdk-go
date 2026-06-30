@@ -222,6 +222,20 @@ func (r *logRW) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
+// Flush delegates to the underlying ResponseWriter's Flusher so streaming
+// responses (SSE /api/events) work even though they go through this logging
+// wrapper. Without it, w.(http.Flusher) fails and RegisterEventStream returns
+// 500 "streaming unsupported".
+func (r *logRW) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer to http.ResponseController (Go 1.20+) so
+// callers can reach Flusher/Hijacker through the wrapper chain.
+func (r *logRW) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // isStaticAsset vráti true pre statické assety (JS/CSS/obrázky/fonty) ktoré
 // nie sú zaujímavé pre logy ani počítadlo requestov.
 func isStaticAsset(path string) bool {

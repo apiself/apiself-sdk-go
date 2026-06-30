@@ -50,11 +50,10 @@ func PublishEvent(eventType string, data any) {
 // any other box route).
 func RegisterEventStream(mux *http.ServeMux) {
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-			return
-		}
+		// ResponseController unwraps middleware wrappers (e.g. the box logging
+		// wrapper) to reach the underlying Flusher - more robust than a direct
+		// w.(http.Flusher) type assertion, which fails behind any wrapper.
+		rc := http.NewResponseController(w)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
@@ -71,7 +70,7 @@ func RegisterEventStream(mux *http.ServeMux) {
 		}()
 
 		_, _ = w.Write([]byte(": connected\n\n"))
-		flusher.Flush()
+		_ = rc.Flush()
 
 		ctx := r.Context()
 		ping := time.NewTicker(25 * time.Second) // keep idle proxies open
@@ -84,10 +83,10 @@ func RegisterEventStream(mux *http.ServeMux) {
 				_, _ = w.Write([]byte("data: "))
 				_, _ = w.Write(msg)
 				_, _ = w.Write([]byte("\n\n"))
-				flusher.Flush()
+				_ = rc.Flush()
 			case <-ping.C:
 				_, _ = w.Write([]byte(": ping\n\n"))
-				flusher.Flush()
+				_ = rc.Flush()
 			}
 		}
 	})
