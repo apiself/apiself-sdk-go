@@ -226,6 +226,15 @@ type BoxConfigExternalDep struct {
 	// no tier gate. "basic" / "pro" matches sdk.HasTier(...) semantics.
 	TierRequired string `json:"tier_required,omitempty"`
 
+	// Provider decides who downloads this shared runtime. "box" (or "sdk")
+	// means the box self-provisions on demand via sdk.EnsureSharedRuntime
+	// (lazy, with progress) - the Manager SKIPS pre-fetch and env injection
+	// for it. "manager" (or empty = legacy default) means the Manager
+	// pre-fetches on install and injects APISELF_SHARED_<NAME>. Both write
+	// the same {DataDir}/shared/{name}/{version}/ location so a runtime is
+	// never downloaded twice regardless of who fetched it.
+	Provider string `json:"provider,omitempty"`
+
 	// On-demand control plane. For static-binary deps (piper, llama-cpp)
 	// these stay empty - install happens implicitly on first use.
 	// For runtime-style deps the Manager / box UI POSTs to TriggerEndpoint
@@ -253,6 +262,17 @@ func (d *BoxConfigExternalDep) IsRequired() bool {
 		return true
 	}
 	return *d.Required
+}
+
+// IsBoxProvided reports whether the box self-provisions this runtime via
+// sdk.EnsureSharedRuntime (Provider "box"/"sdk"). When true the Manager
+// skips pre-fetching + env injection for it. Empty/"manager" = legacy
+// Manager-managed default.
+func (d *BoxConfigExternalDep) IsBoxProvided() bool {
+	if d == nil {
+		return false
+	}
+	return d.Provider == "box" || d.Provider == "sdk"
 }
 
 // BoxConfigExternalDownload describes one platform-specific download
