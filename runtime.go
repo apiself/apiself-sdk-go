@@ -46,6 +46,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
 )
 
@@ -466,10 +467,13 @@ func rtExtract(archivePath, kind, dest string) error {
 		return rtExtractTarGz(archivePath, dest)
 	case "tar.xz":
 		return rtExtractTarXz(archivePath, dest)
+	case "tar.zst", "tzst":
+		return rtExtractTarZst(archivePath, dest)
 	case "deb":
 		return rtExtractDeb(archivePath, dest)
 	default:
-		return fmt.Errorf("unsupported archive format %q", kind)
+		return fmt.Errorf("unsupported archive format %q "+
+			"(add an extractor to sdk runtime.go rtExtract)", kind)
 	}
 }
 
@@ -482,6 +486,8 @@ func rtInferArchive(url string) string {
 		return "tar.gz"
 	case strings.HasSuffix(l, ".tar.xz"):
 		return "tar.xz"
+	case strings.HasSuffix(l, ".tar.zst"), strings.HasSuffix(l, ".tzst"):
+		return "tar.zst"
 	case strings.HasSuffix(l, ".deb"):
 		return "deb"
 	default:
@@ -553,6 +559,20 @@ func rtExtractTarXz(src, dest string) error {
 		return fmt.Errorf("xz: %w", err)
 	}
 	return rtExtractTarStream(xr, dest)
+}
+
+func rtExtractTarZst(src, dest string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	zr, err := zstd.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("zstd: %w", err)
+	}
+	defer zr.Close()
+	return rtExtractTarStream(zr, dest)
 }
 
 // rtExtractTarStream extracts a tar stream (already decompressed) into dest,
@@ -630,8 +650,15 @@ func rtExtractDeb(src, dest string) error {
 			return fmt.Errorf("deb xz: %w", err)
 		}
 		return rtExtractTarStream(xr, dest)
+	case strings.HasSuffix(member, ".zst"):
+		zr, err := zstd.NewReader(r)
+		if err != nil {
+			return fmt.Errorf("deb zstd: %w", err)
+		}
+		defer zr.Close()
+		return rtExtractTarStream(zr, dest)
 	default:
-		return fmt.Errorf("deb: unsupported data member %q (only .gz/.xz)", member)
+		return fmt.Errorf("deb: unsupported data member %q (only .gz/.xz/.zst)", member)
 	}
 }
 
