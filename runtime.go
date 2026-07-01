@@ -92,13 +92,13 @@ func runtimeVersion(dep *BoxConfigExternalDep) string {
 	return "latest"
 }
 
-// runtimeCacheDir is {DataDir}/shared/{name}/{version}.
-func runtimeCacheDir(dep *BoxConfigExternalDep) (string, error) {
+// runtimeCacheDirSeg is {DataDir}/shared/{name}/{segment}.
+func runtimeCacheDirSeg(name, segment string) (string, error) {
 	dataDir := PlatformDataDir()
 	if dataDir == "" {
-		return "", fmt.Errorf("runtime %q: cannot resolve data dir", dep.Name)
+		return "", fmt.Errorf("runtime %q: cannot resolve data dir", name)
 	}
-	return filepath.Join(dataDir, "shared", dep.Name, runtimeVersion(dep)), nil
+	return filepath.Join(dataDir, "shared", name, segment), nil
 }
 
 // rtArchiveKind returns the effective archive kind for a download (explicit or
@@ -129,20 +129,57 @@ func runtimeCachedBin(dl BoxConfigExternalDownload, cacheDir string) string {
 	return filepath.Join(cacheDir, filepath.Base(dl.Binary))
 }
 
+// runtimePlan is the resolved install method for the current platform: either
+// a prebuilt download or a build-from-source recipe, with the computed cache
+// dir + binary path. Build variants get a flags-hash version suffix so two
+// different build configs of the same version don't share a cache dir.
+type runtimePlan struct {
+	cacheDir  string
+	cachedBin string
+	isBuild   bool
+	dl        BoxConfigExternalDownload
+	bld       BoxConfigExternalBuild
+}
+
+// resolveRuntimePlan picks Downloads[platform] first, else Build[platform].
+func resolveRuntimePlan(dep *BoxConfigExternalDep) (runtimePlan, error) {
+	key := platformKey()
+	if dl, ok := dep.Downloads[key]; ok && dl.URL != "" {
+		if dl.Binary == "" {
+			return runtimePlan{}, fmt.Errorf("runtime %q: no binary path for %s", dep.Name, key)
+		}
+		cacheDir, err := runtimeCacheDirSeg(dep.Name, runtimeVersion(dep))
+		if err != nil {
+			return runtimePlan{}, err
+		}
+		return runtimePlan{cacheDir: cacheDir, cachedBin: runtimeCachedBin(dl, cacheDir), dl: dl}, nil
+	}
+	if bld, ok := dep.Build[key]; ok {
+		if bld.Binary == "" {
+			return runtimePlan{}, fmt.Errorf("runtime %q: build recipe has no binary for %s", dep.Name, key)
+		}
+		seg := runtimeVersion(dep) + "-" + rtBuildHash(bld)
+		cacheDir, err := runtimeCacheDirSeg(dep.Name, seg)
+		if err != nil {
+			return runtimePlan{}, err
+		}
+		return runtimePlan{
+			cacheDir:  cacheDir,
+			cachedBin: filepath.Join(cacheDir, filepath.Base(bld.Binary)),
+			isBuild:   true,
+			bld:       bld,
+		}, nil
+	}
+	return runtimePlan{}, fmt.Errorf("runtime %q: not available on this platform (%s)", dep.Name, key)
+}
+
 // runtimeBinPath resolves the cached binary path for a dep (may not exist yet).
 func runtimeBinPath(dep *BoxConfigExternalDep) (string, error) {
-	dl, ok := dep.Downloads[platformKey()]
-	if !ok {
-		return "", fmt.Errorf("runtime %q: not available on this platform (%s)", dep.Name, platformKey())
-	}
-	if dl.Binary == "" {
-		return "", fmt.Errorf("runtime %q: no binary path for %s", dep.Name, platformKey())
-	}
-	cacheDir, err := runtimeCacheDir(dep)
+	p, err := resolveRuntimePlan(dep)
 	if err != nil {
 		return "", err
 	}
-	return runtimeCachedBin(dl, cacheDir), nil
+	return p.cachedBin, nil
 }
 
 // SharedRuntimePath returns the cached binary path for `name` if it is already
@@ -152,18 +189,17 @@ func SharedRuntimePath(name string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	binPath, err := runtimeBinPath(dep)
+	plan, err := resolveRuntimePlan(dep)
 	if err != nil {
 		return "", false
 	}
-	cacheDir, _ := runtimeCacheDir(dep)
-	if _, err := os.Stat(filepath.Join(cacheDir, ".ok")); err != nil {
+	if _, err := os.Stat(filepath.Join(plan.cacheDir, ".ok")); err != nil {
 		return "", false
 	}
-	if fi, err := os.Stat(binPath); err != nil || fi.IsDir() {
+	if fi, err := os.Stat(plan.cachedBin); err != nil || fi.IsDir() {
 		return "", false
 	}
-	return binPath, true
+	return plan.cachedBin, true
 }
 
 // SharedRuntimeInfo returns the config declaration for `name` (for UI: size,
@@ -213,20 +249,12 @@ func EnsureSharedRuntimeDep(ctx context.Context, dep BoxConfigExternalDep, progr
 	name := dep.Name
 	fail := func(err error) (string, error) { progress("error", 0); return "", err }
 
-	dl, ok := dep.Downloads[platformKey()]
-	if !ok {
-		return fail(fmt.Errorf("runtime %q: not available on this platform (%s)", name, platformKey()))
-	}
-	binName := dl.Binary
-	if binName == "" {
-		return fail(fmt.Errorf("runtime %q: no binary path for %s", name, platformKey()))
-	}
-
-	cacheDir, err := runtimeCacheDir(&dep)
+	plan, err := resolveRuntimePlan(&dep)
 	if err != nil {
 		return fail(err)
 	}
-	cachedBin := runtimeCachedBin(dl, cacheDir)
+	cacheDir := plan.cacheDir
+	cachedBin := plan.cachedBin
 	sentinel := filepath.Join(cacheDir, ".ok")
 
 	// Fast path: sentinel + binary present.
@@ -280,62 +308,81 @@ func EnsureSharedRuntimeDep(ctx context.Context, dep BoxConfigExternalDep, progr
 	}
 	defer os.RemoveAll(tmpDir)
 
-	archiveKind := rtArchiveKind(dl)
-	isTree := rtIsTree(dl)
-	extractKind := strings.TrimSuffix(archiveKind, "-tree")
+	// treeInstall marks installs that lay down a whole directory of files
+	// (tree archive OR a build with sibling libs) - chmod the whole tree so
+	// helper executables run.
+	treeInstall := plan.isBuild
 
-	progress("download", 0)
-	archivePath, err := rtDownload(ctx, dl.URL, tmpDir, progress)
-	if err != nil {
-		return fail(err)
-	}
-
-	switch {
-	case archiveKind == "" || archiveKind == "raw" || archiveKind == "binary":
-		// The download IS the binary; move it straight in.
-		if err := rtMoveFile(archivePath, cachedBin); err != nil {
-			return fail(fmt.Errorf("runtime %q: install: %w", name, err))
-		}
-	case isTree:
-		// Multi-file runtime (chrome, python, llama-cpp): extract the whole
-		// archive into the cache dir so the binary keeps its sibling libs/data.
-		progress("extract", 0)
-		if err := rtExtract(archivePath, extractKind, cacheDir); err != nil {
-			return fail(fmt.Errorf("runtime %q: extract: %w", name, err))
+	if plan.isBuild {
+		// Build-from-source: clone/fetch, compile, install the output binary
+		// plus any sibling libs flat into cacheDir.
+		if err := rtBuild(ctx, name, plan.bld, cacheDir, tmpDir, progress); err != nil {
+			return fail(fmt.Errorf("runtime %q: build: %w", name, err))
 		}
 		if fi, err := os.Stat(cachedBin); err != nil || fi.IsDir() {
-			return fail(fmt.Errorf("runtime %q: binary %q missing after extract", name, binName))
+			return fail(fmt.Errorf("runtime %q: binary %q missing after build", name, plan.bld.Binary))
 		}
-	default:
-		// Single-file archive (pandoc single binary, libgomp .so from a .deb):
-		// extract to temp, pluck the one file, install under the binary's
-		// basename. The `inner` field (when set) is the path to locate INSIDE
-		// the archive; `binary` is the installed name (SONAME for libgomp).
-		progress("extract", 0)
-		extractDir, err := os.MkdirTemp(tmpDir, name+"-x-")
+	} else {
+		dl := plan.dl
+		binName := dl.Binary
+		archiveKind := rtArchiveKind(dl)
+		isTree := rtIsTree(dl)
+		treeInstall = isTree
+		extractKind := strings.TrimSuffix(archiveKind, "-tree")
+
+		progress("download", 0)
+		archivePath, err := rtDownload(ctx, dl.URL, tmpDir, progress)
 		if err != nil {
-			return fail(fmt.Errorf("runtime %q: extract dir: %w", name, err))
+			return fail(err)
 		}
-		if err := rtExtract(archivePath, extractKind, extractDir); err != nil {
-			return fail(fmt.Errorf("runtime %q: extract: %w", name, err))
-		}
-		locate := dl.Inner
-		if locate == "" {
-			locate = binName
-		}
-		found, err := rtLocateBinary(extractDir, locate)
-		if err != nil {
-			return fail(fmt.Errorf("runtime %q: %w", name, err))
-		}
-		if err := rtMoveFile(found, cachedBin); err != nil {
-			return fail(fmt.Errorf("runtime %q: install: %w", name, err))
+
+		switch {
+		case archiveKind == "" || archiveKind == "raw" || archiveKind == "binary":
+			// The download IS the binary; move it straight in.
+			if err := rtMoveFile(archivePath, cachedBin); err != nil {
+				return fail(fmt.Errorf("runtime %q: install: %w", name, err))
+			}
+		case isTree:
+			// Multi-file runtime (chrome, python, llama-cpp): extract the whole
+			// archive into the cache dir so the binary keeps its sibling libs/data.
+			progress("extract", 0)
+			if err := rtExtract(archivePath, extractKind, cacheDir); err != nil {
+				return fail(fmt.Errorf("runtime %q: extract: %w", name, err))
+			}
+			if fi, err := os.Stat(cachedBin); err != nil || fi.IsDir() {
+				return fail(fmt.Errorf("runtime %q: binary %q missing after extract", name, binName))
+			}
+		default:
+			// Single-file archive (pandoc single binary, libgomp .so from a .deb):
+			// extract to temp, pluck the one file, install under the binary's
+			// basename. The `inner` field (when set) is the path to locate INSIDE
+			// the archive; `binary` is the installed name (SONAME for libgomp).
+			progress("extract", 0)
+			extractDir, err := os.MkdirTemp(tmpDir, name+"-x-")
+			if err != nil {
+				return fail(fmt.Errorf("runtime %q: extract dir: %w", name, err))
+			}
+			if err := rtExtract(archivePath, extractKind, extractDir); err != nil {
+				return fail(fmt.Errorf("runtime %q: extract: %w", name, err))
+			}
+			locate := dl.Inner
+			if locate == "" {
+				locate = binName
+			}
+			found, err := rtLocateBinary(extractDir, locate)
+			if err != nil {
+				return fail(fmt.Errorf("runtime %q: %w", name, err))
+			}
+			if err := rtMoveFile(found, cachedBin); err != nil {
+				return fail(fmt.Errorf("runtime %q: install: %w", name, err))
+			}
 		}
 	}
 
 	if runtime.GOOS != "windows" {
-		if isTree {
-			// The whole tree may contain helper executables (e.g. chrome's
-			// crashpad handler); make regular files runnable.
+		if treeInstall {
+			// The tree may contain helper executables (chrome's crashpad
+			// handler, build sibling libs); make regular files runnable.
 			rtChmodTree(cacheDir)
 		} else {
 			_ = os.Chmod(cachedBin, 0o755)

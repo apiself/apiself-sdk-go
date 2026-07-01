@@ -247,12 +247,59 @@ type BoxConfigExternalDep struct {
 	// computed differently (pure pip / npm deps without a base runtime).
 	Downloads map[string]BoxConfigExternalDownload `json:"downloads,omitempty"`
 
+	// Per-platform build-from-source recipes. Used when a platform has no
+	// prebuilt asset (e.g. whisper.cpp on macOS). Same "os-arch" keys as
+	// Downloads. For a given platform the installer prefers Downloads;
+	// falls back to Build. Both install into the same shared/ location.
+	Build map[string]BoxConfigExternalBuild `json:"build,omitempty"`
+
 	// Python engines: pip-installed wheels with per-package progress.
 	PipPackages   []BoxConfigPipPackage `json:"pip_packages,omitempty"`
 	PipExtraIndex string                `json:"pip_extra_index,omitempty"`
 
 	// Node engines: parallel shape to PipPackages.
 	NpmPackages []BoxConfigNpmPackage `json:"npm_packages,omitempty"`
+}
+
+// BoxConfigExternalBuild is a generic build-from-source recipe for one
+// platform. Recipe-driven so it can build anything (not runtime-specific):
+// "cmake" runs a cmake configure + build; "shell" runs arbitrary commands
+// (covers make, cargo, go build, ...). The build runs in a temp checkout;
+// only Output (the primary binary) plus any Libs matches are installed into
+// the shared cache dir, flat, so loader-relative (@rpath / $ORIGIN) sibling
+// libs resolve.
+type BoxConfigExternalBuild struct {
+	// Recipe: "cmake" | "shell".
+	Recipe string `json:"recipe"`
+
+	// Source of the code to build (a shallow git checkout at Ref, or a
+	// source tarball URL extracted first).
+	Source BoxConfigBuildSource `json:"source"`
+
+	// cmake recipe: flags passed at configure (`-D...`) + the build target.
+	ConfigureFlags []string `json:"configure_flags,omitempty"`
+	Target         string   `json:"target,omitempty"`
+
+	// shell recipe: commands run sequentially in the checkout dir.
+	Commands []string `json:"commands,omitempty"`
+
+	// Extra environment for the build (e.g. MACOSX_DEPLOYMENT_TARGET, CC).
+	Env map[string]string `json:"env,omitempty"`
+
+	// Output is the primary built binary, relative to the checkout dir
+	// (e.g. "build/bin/whisper-cli"). Binary is its installed name/rel-path
+	// in the shared cache dir. Libs are glob patterns (relative to the
+	// checkout dir) of sibling libraries copied next to the binary.
+	Output string   `json:"output"`
+	Binary string   `json:"binary"`
+	Libs   []string `json:"libs,omitempty"`
+}
+
+// BoxConfigBuildSource points at the source tree for a build recipe.
+type BoxConfigBuildSource struct {
+	Git string `json:"git,omitempty"` // git repo URL (shallow clone at Ref)
+	URL string `json:"url,omitempty"` // OR a source tarball URL
+	Ref string `json:"ref,omitempty"` // tag / branch / commit
 }
 
 // IsRequired returns whether the dependency must succeed before the box
