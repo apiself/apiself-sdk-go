@@ -97,21 +97,48 @@ func runtimeCacheDir(dep *BoxConfigExternalDep) (string, error) {
 	return filepath.Join(dataDir, "shared", dep.Name, runtimeVersion(dep)), nil
 }
 
+// rtArchiveKind returns the effective archive kind for a download (explicit or
+// inferred from the URL suffix).
+func rtArchiveKind(dl BoxConfigExternalDownload) string {
+	if dl.Archive != "" {
+		return dl.Archive
+	}
+	return rtInferArchive(dl.URL)
+}
+
+// rtIsTree reports whether a runtime is a multi-file "tree" (its binary needs
+// sibling files - DLLs, .pak, icudtl.dat - kept next to it, e.g.
+// chrome-headless-shell or a full python runtime). Signalled by a "-tree"
+// archive-kind suffix (zip-tree, tar.gz-tree). Non-tree runtimes are a single
+// self-contained binary (pandoc) flattened into the cache dir.
+func rtIsTree(dl BoxConfigExternalDownload) bool {
+	return strings.HasSuffix(rtArchiveKind(dl), "-tree")
+}
+
+// runtimeCachedBin computes the cached binary path for a download. Tree
+// runtimes preserve the archive's relative structure so companions stay put;
+// single-binary runtimes flatten to {cacheDir}/{basename}.
+func runtimeCachedBin(dl BoxConfigExternalDownload, cacheDir string) string {
+	if rtIsTree(dl) {
+		return filepath.Join(cacheDir, filepath.FromSlash(dl.Binary))
+	}
+	return filepath.Join(cacheDir, filepath.Base(dl.Binary))
+}
+
 // runtimeBinPath resolves the cached binary path for a dep (may not exist yet).
 func runtimeBinPath(dep *BoxConfigExternalDep) (string, error) {
 	dl, ok := dep.Downloads[platformKey()]
 	if !ok {
 		return "", fmt.Errorf("runtime %q: not available on this platform (%s)", dep.Name, platformKey())
 	}
-	binName := dl.Binary
-	if binName == "" {
+	if dl.Binary == "" {
 		return "", fmt.Errorf("runtime %q: no binary path for %s", dep.Name, platformKey())
 	}
 	cacheDir, err := runtimeCacheDir(dep)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(cacheDir, filepath.Base(binName)), nil
+	return runtimeCachedBin(dl, cacheDir), nil
 }
 
 // SharedRuntimePath returns the cached binary path for `name` if it is already
@@ -171,7 +198,7 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 		rtEmit(name, "error", 0)
 		return "", err
 	}
-	cachedBin := filepath.Join(cacheDir, filepath.Base(binName))
+	cachedBin := runtimeCachedBin(dl, cacheDir)
 	sentinel := filepath.Join(cacheDir, ".ok")
 
 	// Fast path: sentinel + binary present.
@@ -229,10 +256,9 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	archiveKind := dl.Archive
-	if archiveKind == "" {
-		archiveKind = rtInferArchive(dl.URL)
-	}
+	archiveKind := rtArchiveKind(dl)
+	isTree := rtIsTree(dl)
+	extractKind := strings.TrimSuffix(archiveKind, "-tree")
 
 	rtEmit(name, "download", 0)
 	archivePath, err := rtDownload(ctx, name, dl.URL, tmpDir)
@@ -241,20 +267,34 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 		return "", err
 	}
 
-	// "raw" (or no archive) = the download IS the binary; move it straight in.
-	if archiveKind == "" || archiveKind == "raw" || archiveKind == "binary" {
+	switch {
+	case archiveKind == "" || archiveKind == "raw" || archiveKind == "binary":
+		// The download IS the binary; move it straight in.
 		if err := rtMoveFile(archivePath, cachedBin); err != nil {
 			rtEmit(name, "error", 0)
 			return "", fmt.Errorf("runtime %q: install: %w", name, err)
 		}
-	} else {
+	case isTree:
+		// Multi-file runtime (chrome, python): extract the whole archive into
+		// the cache dir so the binary keeps its sibling libraries/data.
+		rtEmit(name, "extract", 0)
+		if err := rtExtract(archivePath, extractKind, cacheDir); err != nil {
+			rtEmit(name, "error", 0)
+			return "", fmt.Errorf("runtime %q: extract: %w", name, err)
+		}
+		if fi, err := os.Stat(cachedBin); err != nil || fi.IsDir() {
+			rtEmit(name, "error", 0)
+			return "", fmt.Errorf("runtime %q: binary %q missing after extract", name, binName)
+		}
+	default:
+		// Single-binary archive (pandoc): extract to temp, pluck the binary.
 		rtEmit(name, "extract", 0)
 		extractDir, err := os.MkdirTemp(tmpDir, name+"-x-")
 		if err != nil {
 			rtEmit(name, "error", 0)
 			return "", fmt.Errorf("runtime %q: extract dir: %w", name, err)
 		}
-		if err := rtExtract(archivePath, archiveKind, extractDir); err != nil {
+		if err := rtExtract(archivePath, extractKind, extractDir); err != nil {
 			rtEmit(name, "error", 0)
 			return "", fmt.Errorf("runtime %q: extract: %w", name, err)
 		}
@@ -270,7 +310,13 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 	}
 
 	if runtime.GOOS != "windows" {
-		_ = os.Chmod(cachedBin, 0o755)
+		if isTree {
+			// The whole tree may contain helper executables (e.g. chrome's
+			// crashpad handler); make regular files runnable.
+			rtChmodTree(cacheDir)
+		} else {
+			_ = os.Chmod(cachedBin, 0o755)
+		}
 	}
 	if err := os.WriteFile(sentinel, []byte("ok"), 0o644); err != nil {
 		_ = err // non-fatal; next call just re-verifies the binary
@@ -556,4 +602,17 @@ func rtMoveFile(src, dst string) error {
 
 func rtEmit(name, phase string, pct int) {
 	PublishEvent("runtime", map[string]any{"name": name, "phase": phase, "pct": pct})
+}
+
+// rtChmodTree makes every regular file in a tree runtime executable (0755) on
+// non-Windows so helper binaries next to the main one (crashpad handler, etc.)
+// can run. Non-fatal: extraction already succeeded.
+func rtChmodTree(root string) {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		_ = os.Chmod(path, 0o755)
+		return nil
+	})
 }
