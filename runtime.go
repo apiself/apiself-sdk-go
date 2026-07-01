@@ -41,9 +41,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ulikunitz/xz"
 )
 
 var (
@@ -176,27 +179,51 @@ func SharedRuntimeInfo(name string) (BoxConfigExternalDep, bool) {
 // dependencies.external[]) is installed in the shared data dir and returns the
 // absolute path to its binary. Idempotent (cache hit returns immediately),
 // cross-process safe, emits "runtime" progress events. Never panics.
+//
+// This is the box-side entry point: it resolves the dep from the box's own
+// config.json and reports progress via the "runtime" SSE event. The manager
+// (which installs on behalf of a box it doesn't run in) calls
+// EnsureSharedRuntimeDep directly with the box's dep + its own progress sink.
 func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 	dep, err := findExternalDep(name)
 	if err != nil {
 		rtEmit(name, "error", 0)
 		return "", err
 	}
+	return EnsureSharedRuntimeDep(ctx, *dep, func(phase string, pct int) {
+		rtEmit(name, phase, pct)
+	})
+}
+
+// RuntimeProgressFn reports install progress: phase in
+// {download, extract, ready, error}, pct 0-100 (meaningful for "download").
+type RuntimeProgressFn func(phase string, pct int)
+
+// EnsureSharedRuntimeDep is the single installer both the box (via
+// EnsureSharedRuntime) and the manager call. It installs dep's binary into the
+// shared data dir ({DataDir}/shared/{name}/{version}/) and returns the absolute
+// path to it. Idempotent (cache hit returns immediately), cross-process safe,
+// and never panics. Progress is delivered via the callback so the caller owns
+// the transport (box SSE, manager SSE, CLI, ...).
+func EnsureSharedRuntimeDep(ctx context.Context, dep BoxConfigExternalDep, progress RuntimeProgressFn) (string, error) {
+	if progress == nil {
+		progress = func(string, int) {}
+	}
+	name := dep.Name
+	fail := func(err error) (string, error) { progress("error", 0); return "", err }
+
 	dl, ok := dep.Downloads[platformKey()]
 	if !ok {
-		rtEmit(name, "error", 0)
-		return "", fmt.Errorf("runtime %q: not available on this platform (%s)", name, platformKey())
+		return fail(fmt.Errorf("runtime %q: not available on this platform (%s)", name, platformKey()))
 	}
 	binName := dl.Binary
 	if binName == "" {
-		rtEmit(name, "error", 0)
-		return "", fmt.Errorf("runtime %q: no binary path for %s", name, platformKey())
+		return fail(fmt.Errorf("runtime %q: no binary path for %s", name, platformKey()))
 	}
 
-	cacheDir, err := runtimeCacheDir(dep)
+	cacheDir, err := runtimeCacheDir(&dep)
 	if err != nil {
-		rtEmit(name, "error", 0)
-		return "", err
+		return fail(err)
 	}
 	cachedBin := runtimeCachedBin(dl, cacheDir)
 	sentinel := filepath.Join(cacheDir, ".ok")
@@ -208,7 +235,7 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 		}
 	}
 
-	// In-process serialization (this box).
+	// In-process serialization (this process).
 	m := rtLockFor(name)
 	m.Lock()
 	defer m.Unlock()
@@ -221,22 +248,19 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 	}
 
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		rtEmit(name, "error", 0)
-		return "", fmt.Errorf("runtime %q: create cache dir: %w", name, err)
+		return fail(fmt.Errorf("runtime %q: create cache dir: %w", name, err))
 	}
 
-	// Cross-process lock (other boxes). If a sibling holds it, wait for the
-	// sentinel instead of downloading twice.
+	// Cross-process lock (other boxes / the manager). If a sibling holds it,
+	// wait for the sentinel instead of downloading twice.
 	lockPath := filepath.Join(cacheDir, ".lock")
 	locked, err := acquireDownloadLock(lockPath)
 	if err != nil {
-		rtEmit(name, "error", 0)
-		return "", fmt.Errorf("runtime %q: lock: %w", name, err)
+		return fail(fmt.Errorf("runtime %q: lock: %w", name, err))
 	}
 	if !locked {
 		if err := waitForSentinel(sentinel, 30*time.Minute); err != nil {
-			rtEmit(name, "error", 0)
-			return "", err
+			return fail(err)
 		}
 		return cachedBin, nil
 	}
@@ -251,8 +275,7 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 
 	tmpDir := filepath.Join(cacheDir, ".tmp")
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		rtEmit(name, "error", 0)
-		return "", fmt.Errorf("runtime %q: temp dir: %w", name, err)
+		return fail(fmt.Errorf("runtime %q: temp dir: %w", name, err))
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -260,52 +283,51 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 	isTree := rtIsTree(dl)
 	extractKind := strings.TrimSuffix(archiveKind, "-tree")
 
-	rtEmit(name, "download", 0)
-	archivePath, err := rtDownload(ctx, name, dl.URL, tmpDir)
+	progress("download", 0)
+	archivePath, err := rtDownload(ctx, dl.URL, tmpDir, progress)
 	if err != nil {
-		rtEmit(name, "error", 0)
-		return "", err
+		return fail(err)
 	}
 
 	switch {
 	case archiveKind == "" || archiveKind == "raw" || archiveKind == "binary":
 		// The download IS the binary; move it straight in.
 		if err := rtMoveFile(archivePath, cachedBin); err != nil {
-			rtEmit(name, "error", 0)
-			return "", fmt.Errorf("runtime %q: install: %w", name, err)
+			return fail(fmt.Errorf("runtime %q: install: %w", name, err))
 		}
 	case isTree:
-		// Multi-file runtime (chrome, python): extract the whole archive into
-		// the cache dir so the binary keeps its sibling libraries/data.
-		rtEmit(name, "extract", 0)
+		// Multi-file runtime (chrome, python, llama-cpp): extract the whole
+		// archive into the cache dir so the binary keeps its sibling libs/data.
+		progress("extract", 0)
 		if err := rtExtract(archivePath, extractKind, cacheDir); err != nil {
-			rtEmit(name, "error", 0)
-			return "", fmt.Errorf("runtime %q: extract: %w", name, err)
+			return fail(fmt.Errorf("runtime %q: extract: %w", name, err))
 		}
 		if fi, err := os.Stat(cachedBin); err != nil || fi.IsDir() {
-			rtEmit(name, "error", 0)
-			return "", fmt.Errorf("runtime %q: binary %q missing after extract", name, binName)
+			return fail(fmt.Errorf("runtime %q: binary %q missing after extract", name, binName))
 		}
 	default:
-		// Single-binary archive (pandoc): extract to temp, pluck the binary.
-		rtEmit(name, "extract", 0)
+		// Single-file archive (pandoc single binary, libgomp .so from a .deb):
+		// extract to temp, pluck the one file, install under the binary's
+		// basename. The `inner` field (when set) is the path to locate INSIDE
+		// the archive; `binary` is the installed name (SONAME for libgomp).
+		progress("extract", 0)
 		extractDir, err := os.MkdirTemp(tmpDir, name+"-x-")
 		if err != nil {
-			rtEmit(name, "error", 0)
-			return "", fmt.Errorf("runtime %q: extract dir: %w", name, err)
+			return fail(fmt.Errorf("runtime %q: extract dir: %w", name, err))
 		}
 		if err := rtExtract(archivePath, extractKind, extractDir); err != nil {
-			rtEmit(name, "error", 0)
-			return "", fmt.Errorf("runtime %q: extract: %w", name, err)
+			return fail(fmt.Errorf("runtime %q: extract: %w", name, err))
 		}
-		found, err := rtLocateBinary(extractDir, binName)
+		locate := dl.Inner
+		if locate == "" {
+			locate = binName
+		}
+		found, err := rtLocateBinary(extractDir, locate)
 		if err != nil {
-			rtEmit(name, "error", 0)
-			return "", fmt.Errorf("runtime %q: %w", name, err)
+			return fail(fmt.Errorf("runtime %q: %w", name, err))
 		}
 		if err := rtMoveFile(found, cachedBin); err != nil {
-			rtEmit(name, "error", 0)
-			return "", fmt.Errorf("runtime %q: install: %w", name, err)
+			return fail(fmt.Errorf("runtime %q: install: %w", name, err))
 		}
 	}
 
@@ -322,7 +344,7 @@ func EnsureSharedRuntime(ctx context.Context, name string) (string, error) {
 		_ = err // non-fatal; next call just re-verifies the binary
 	}
 
-	rtEmit(name, "ready", 100)
+	progress("ready", 100)
 	Audit("runtime.download", name, fmt.Sprintf("%s installed to %s", platformKey(), cacheDir))
 	return cachedBin, nil
 }
@@ -383,7 +405,7 @@ func RegisterRuntimeEndpoints(mux *http.ServeMux) {
 
 // ── download + extract helpers (stdlib-only) ─────────────────────────────────
 
-func rtDownload(ctx context.Context, name, url, tmpDir string) (string, error) {
+func rtDownload(ctx context.Context, url, tmpDir string, progress RuntimeProgressFn) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("build request: %w", err)
@@ -397,12 +419,12 @@ func rtDownload(ctx context.Context, name, url, tmpDir string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
-	f, err := os.CreateTemp(tmpDir, name+"-dl-*")
+	f, err := os.CreateTemp(tmpDir, "dl-*")
 	if err != nil {
 		return "", fmt.Errorf("temp file: %w", err)
 	}
 	tmpPath := f.Name()
-	pw := &rtProgressWriter{name: name, total: resp.ContentLength, last: time.Now()}
+	pw := &rtProgressWriter{progress: progress, total: resp.ContentLength, last: time.Now()}
 	if _, err := io.Copy(io.MultiWriter(f, pw), resp.Body); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
@@ -416,10 +438,10 @@ func rtDownload(ctx context.Context, name, url, tmpDir string) (string, error) {
 }
 
 type rtProgressWriter struct {
-	name  string
-	total int64
-	seen  int64
-	last  time.Time
+	progress RuntimeProgressFn
+	total    int64
+	seen     int64
+	last     time.Time
 }
 
 func (p *rtProgressWriter) Write(b []byte) (int, error) {
@@ -431,7 +453,7 @@ func (p *rtProgressWriter) Write(b []byte) (int, error) {
 		if p.total > 0 {
 			pct = int(p.seen * 100 / p.total)
 		}
-		rtEmit(p.name, "download", pct)
+		p.progress("download", pct)
 	}
 	return n, nil
 }
@@ -440,10 +462,12 @@ func rtExtract(archivePath, kind, dest string) error {
 	switch kind {
 	case "zip":
 		return rtExtractZip(archivePath, dest)
-	case "tar.gz", "tgz", "tar.gz-tree":
+	case "tar.gz", "tgz":
 		return rtExtractTarGz(archivePath, dest)
 	case "tar.xz":
-		return fmt.Errorf("tar.xz archives are not supported (choose a .zip or .tar.gz asset)")
+		return rtExtractTarXz(archivePath, dest)
+	case "deb":
+		return rtExtractDeb(archivePath, dest)
 	default:
 		return fmt.Errorf("unsupported archive format %q", kind)
 	}
@@ -458,6 +482,8 @@ func rtInferArchive(url string) string {
 		return "tar.gz"
 	case strings.HasSuffix(l, ".tar.xz"):
 		return "tar.xz"
+	case strings.HasSuffix(l, ".deb"):
+		return "deb"
 	default:
 		return ""
 	}
@@ -513,7 +539,27 @@ func rtExtractTarGz(src, dest string) error {
 		return err
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	return rtExtractTarStream(gz, dest)
+}
+
+func rtExtractTarXz(src, dest string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	xr, err := xz.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("xz: %w", err)
+	}
+	return rtExtractTarStream(xr, dest)
+}
+
+// rtExtractTarStream extracts a tar stream (already decompressed) into dest,
+// preserving directory structure and symlinks. Shared by tar.gz / tar.xz / the
+// inner data tarball of a .deb.
+func rtExtractTarStream(r io.Reader, dest string) error {
+	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -531,6 +577,14 @@ func rtExtractTarGz(src, dest string) error {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			_ = os.Remove(target)
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return err
+			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
@@ -544,6 +598,80 @@ func rtExtractTarGz(src, dest string) error {
 				return err
 			}
 			out.Close()
+		}
+	}
+}
+
+// rtExtractDeb extracts a Debian .deb package into dest. A .deb is an `ar`
+// archive containing debian-binary, control.tar.*, and data.tar.{gz,xz,zst};
+// we extract the data tarball (the actual files) into dest. Used for single
+// shared libraries pulled from distro packages (e.g. libgomp).
+func rtExtractDeb(src, dest string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	member, r, err := rtArFindMember(f, "data.tar")
+	if err != nil {
+		return fmt.Errorf("deb: %w", err)
+	}
+	switch {
+	case strings.HasSuffix(member, ".gz"):
+		gz, err := gzip.NewReader(r)
+		if err != nil {
+			return fmt.Errorf("deb gzip: %w", err)
+		}
+		defer gz.Close()
+		return rtExtractTarStream(gz, dest)
+	case strings.HasSuffix(member, ".xz"):
+		xr, err := xz.NewReader(r)
+		if err != nil {
+			return fmt.Errorf("deb xz: %w", err)
+		}
+		return rtExtractTarStream(xr, dest)
+	default:
+		return fmt.Errorf("deb: unsupported data member %q (only .gz/.xz)", member)
+	}
+}
+
+// rtArFindMember scans a Unix `ar` archive for the first member whose name
+// starts with prefix, returning the full member name and a reader limited to
+// its bytes. `ar` format: an 8-byte magic ("!<arch>\n") then, per member, a
+// 60-byte header (name[16], mtime[12], uid[6], gid[6], mode[8], size[10],
+// magic[2]) followed by size bytes, padded to an even offset.
+func rtArFindMember(f *os.File, prefix string) (string, io.Reader, error) {
+	magic := make([]byte, 8)
+	if _, err := io.ReadFull(f, magic); err != nil {
+		return "", nil, err
+	}
+	if string(magic) != "!<arch>\n" {
+		return "", nil, fmt.Errorf("not an ar archive")
+	}
+	hdr := make([]byte, 60)
+	for {
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			if errors.Is(err, io.EOF) {
+				return "", nil, fmt.Errorf("member %q* not found", prefix)
+			}
+			return "", nil, err
+		}
+		name := strings.TrimRight(string(hdr[0:16]), " ")
+		name = strings.TrimSuffix(name, "/") // GNU ar terminates names with '/'
+		size, err := strconv.ParseInt(strings.TrimSpace(string(hdr[48:58])), 10, 64)
+		if err != nil {
+			return "", nil, fmt.Errorf("ar size: %w", err)
+		}
+		if strings.HasPrefix(name, prefix) {
+			return name, io.LimitReader(f, size), nil
+		}
+		// Skip this member's data (+1 pad byte when size is odd).
+		skip := size
+		if size%2 == 1 {
+			skip++
+		}
+		if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+			return "", nil, err
 		}
 	}
 }
