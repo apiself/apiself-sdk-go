@@ -803,7 +803,11 @@ func rtMoveFile(src, dst string) error {
 }
 
 func rtEmit(name, phase string, pct int) {
+	// "runtime" for the per-runtime RuntimeGate/useRuntimeStatus; "dep" is the
+	// unified event the <BoxDependencies> card / useBoxDeps listens to
+	// (docs/box-dependencies-standard.md). Both carry the same payload.
 	PublishEvent("runtime", map[string]any{"name": name, "phase": phase, "pct": pct})
+	PublishEvent("dep", map[string]any{"kind": "runtime", "name": name, "phase": phase, "pct": pct})
 }
 
 // rtChmodTree makes every regular file in a tree runtime executable (0755) on
