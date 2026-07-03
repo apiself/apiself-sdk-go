@@ -490,17 +490,22 @@ type rtProgressWriter struct {
 	total    int64
 	seen     int64
 	last     time.Time
+	lastPct  int
 }
 
 func (p *rtProgressWriter) Write(b []byte) (int, error) {
 	n := len(b)
 	p.seen += int64(n)
-	if time.Since(p.last) >= 500*time.Millisecond {
+	pct := 0
+	if p.total > 0 {
+		pct = int(p.seen * 100 / p.total)
+	}
+	// Emit on a 150ms tick OR whenever the percentage advances - so even a
+	// small/fast download (piper ~20 MB) shows visible movement instead of
+	// jumping straight from 0% to ready.
+	if time.Since(p.last) >= 150*time.Millisecond || pct > p.lastPct {
 		p.last = time.Now()
-		pct := 0
-		if p.total > 0 {
-			pct = int(p.seen * 100 / p.total)
-		}
+		p.lastPct = pct
 		p.progress("download", pct)
 	}
 	return n, nil
