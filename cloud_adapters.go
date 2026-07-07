@@ -157,3 +157,87 @@ func (openAIImages) Generate(ctx context.Context, key string, req ImageRequest) 
 	}
 	return base64.StdEncoding.DecodeString(out.Data[0].B64)
 }
+
+// ── Google Gemini (images — "Nano Banana") ───────────────────────────────
+
+func init() { RegisterCloudAdapter(geminiImages{}) }
+
+// geminiImages implements ImageAdapter against the Gemini generateContent
+// API. gemini-2.5-flash-image is Google's image model (nicknamed "Nano
+// Banana"); it returns the image as an inlineData part.
+type geminiImages struct{}
+
+func (geminiImages) ID() string         { return "gemini" }
+func (geminiImages) Capability() string { return "image" }
+
+func (geminiImages) Models(_ context.Context, _ string) ([]CloudModel, error) {
+	return []CloudModel{
+		{ID: "gemini-2.5-flash-image", Label: "Gemini 2.5 Flash Image (Nano Banana)"},
+	}, nil
+}
+
+func (geminiImages) Generate(ctx context.Context, key string, req ImageRequest) ([]byte, error) {
+	if key == "" {
+		return nil, fmt.Errorf("gemini: no API key configured")
+	}
+	model := req.Model
+	if model == "" {
+		model = "gemini-2.5-flash-image"
+	}
+	body, _ := json.Marshal(map[string]any{
+		"contents": []map[string]any{
+			{"parts": []map[string]any{{"text": req.Prompt}}},
+		},
+		"generationConfig": map[string]any{"responseModalities": []string{"TEXT", "IMAGE"}},
+	})
+	url := "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent"
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	hr.Header.Set("Content-Type", "application/json")
+	hr.Header.Set("x-goog-api-key", key)
+	cl := &http.Client{Timeout: 120 * time.Second}
+	res, err := cl.Do(hr)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 32<<20))
+	if res.StatusCode != http.StatusOK {
+		var e struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		msg := e.Error.Message
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", res.StatusCode)
+		}
+		return nil, fmt.Errorf("gemini: %s", msg)
+	}
+	var out struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					InlineData struct {
+						MimeType string `json:"mimeType"`
+						Data     string `json:"data"`
+					} `json:"inlineData"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("gemini: bad response")
+	}
+	for _, c := range out.Candidates {
+		for _, p := range c.Content.Parts {
+			if p.InlineData.Data != "" {
+				return base64.StdEncoding.DecodeString(p.InlineData.Data)
+			}
+		}
+	}
+	return nil, fmt.Errorf("gemini: no image in response")
+}
