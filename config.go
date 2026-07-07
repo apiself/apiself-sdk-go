@@ -64,6 +64,15 @@ type BoxConfigFile struct {
 	// boxes without any AI-model story.
 	Models *BoxConfigModels `json:"models,omitempty"`
 
+	// Providers - BYOK cloud provider catalogue declared by the box. The
+	// cloud half of the AI Studio standard (docs/box-ai-studio-spec.md):
+	// each preset is a cloud alternative to running a local model (OpenAI,
+	// Anthropic, Gemini, ElevenLabs, ...). The SDK ProviderStore UPSERTs
+	// each preset into the box DB at startup (source='preset'); user-added
+	// providers + encrypted API keys live as source='custom' and survive
+	// config changes. Optional - leave nil for boxes with no cloud story.
+	Providers *BoxConfigProviders `json:"providers,omitempty"`
+
 	// Datasets - static asset bundles the box ships (preview MP3s for
 	// the voice catalogue, language data, test corpora, ...). Each
 	// entry is fetched + extracted once into {DataDir}/shared/datasets/<name>/
@@ -148,6 +157,58 @@ type BoxConfigModelPreset struct {
 	DescriptionShort  string   `json:"descriptionShort,omitempty"`
 	License           string   `json:"license,omitempty"`
 	TierRequired      string   `json:"tierRequired,omitempty"`
+}
+
+// BoxConfigProviders declares a BYOK cloud provider catalogue owned by
+// the box (docs/box-ai-studio-spec.md §5). The SDK ProviderStore UPSERTs
+// each preset into the box `providers` table at startup.
+type BoxConfigProviders struct {
+	// Capability the box calls providers for: "chat" | "image" | "tts" |
+	// "transcribe". Used to pick the matching CloudAdapter and to filter
+	// which provider models make sense. Optional (informational today).
+	Capability string                    `json:"capability,omitempty"`
+	Presets    []BoxConfigProviderPreset `json:"presets,omitempty"`
+}
+
+// BoxConfigProviderPreset is one curated cloud provider entry. Never holds
+// an API key - keys are user-supplied at runtime and stored encrypted as
+// source='custom' rows, never in config.json.
+type BoxConfigProviderPreset struct {
+	ID         string   `json:"id"`              // stable id, e.g. "openai"
+	Adapter    string   `json:"adapter"`         // CloudAdapter id, e.g. "openai"
+	Label      string   `json:"label"`           // display name, e.g. "OpenAI"
+	Models     []string `json:"models,omitempty"` // offered cloud model ids
+	DocsURL    string   `json:"docsUrl,omitempty"` // "where to get a key" link
+	Capability string   `json:"capability,omitempty"` // override the box-level capability
+}
+
+// PresetsAsProviders converts the config.json provider preset list into the
+// ProviderStore row shape. Returns an empty slice when cfg.Providers is nil.
+func (c *BoxConfigFile) PresetsAsProviders() []Provider {
+	if c == nil || c.Providers == nil {
+		return nil
+	}
+	out := make([]Provider, 0, len(c.Providers.Presets))
+	for _, p := range c.Providers.Presets {
+		cap := p.Capability
+		if cap == "" {
+			cap = c.Providers.Capability
+		}
+		adapter := p.Adapter
+		if adapter == "" {
+			adapter = p.ID
+		}
+		out = append(out, Provider{
+			ID:         p.ID,
+			Source:     "preset",
+			Adapter:    adapter,
+			Label:      p.Label,
+			Models:     p.Models,
+			DocsURL:    p.DocsURL,
+			Capability: cap,
+		})
+	}
+	return out
 }
 
 // PresetsAsModels converts the config.json preset list into the
