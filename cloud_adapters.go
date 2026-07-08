@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -184,11 +185,14 @@ func (geminiImages) Generate(ctx context.Context, key string, req ImageRequest) 
 	if model == "" {
 		model = "gemini-2.5-flash-image"
 	}
+	// Documented form for gemini-2.5-flash-image: just the prompt; the image
+	// model returns the picture as an inlineData part. (Do NOT set
+	// responseModalities here — the dedicated image model returns text-only
+	// when it's constrained the wrong way.)
 	body, _ := json.Marshal(map[string]any{
 		"contents": []map[string]any{
 			{"parts": []map[string]any{{"text": req.Prompt}}},
 		},
-		"generationConfig": map[string]any{"responseModalities": []string{"TEXT", "IMAGE"}},
 	})
 	url := "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent"
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -217,27 +221,56 @@ func (geminiImages) Generate(ctx context.Context, key string, req ImageRequest) 
 		}
 		return nil, fmt.Errorf("gemini: %s", msg)
 	}
+	// Accept both camelCase (REST) and snake_case (some responses) for the
+	// inline image bytes.
 	var out struct {
 		Candidates []struct {
-			Content struct {
+			FinishReason string `json:"finishReason"`
+			Content      struct {
 				Parts []struct {
-					InlineData struct {
+					Text        string `json:"text"`
+					InlineData  *struct {
 						MimeType string `json:"mimeType"`
 						Data     string `json:"data"`
 					} `json:"inlineData"`
+					InlineData2 *struct {
+						MimeType string `json:"mime_type"`
+						Data     string `json:"data"`
+					} `json:"inline_data"`
 				} `json:"parts"`
 			} `json:"content"`
 		} `json:"candidates"`
+		PromptFeedback struct {
+			BlockReason string `json:"blockReason"`
+		} `json:"promptFeedback"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("gemini: bad response")
 	}
+	var textParts []string
 	for _, c := range out.Candidates {
 		for _, p := range c.Content.Parts {
-			if p.InlineData.Data != "" {
+			if p.InlineData != nil && p.InlineData.Data != "" {
 				return base64.StdEncoding.DecodeString(p.InlineData.Data)
 			}
+			if p.InlineData2 != nil && p.InlineData2.Data != "" {
+				return base64.StdEncoding.DecodeString(p.InlineData2.Data)
+			}
+			if p.Text != "" {
+				textParts = append(textParts, p.Text)
+			}
 		}
+	}
+	// No image — surface why (safety block, or the model replied with text).
+	if out.PromptFeedback.BlockReason != "" {
+		return nil, fmt.Errorf("gemini: blocked (%s)", out.PromptFeedback.BlockReason)
+	}
+	if len(textParts) > 0 {
+		msg := strings.Join(textParts, " ")
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return nil, fmt.Errorf("gemini: model returned text, no image — %s", msg)
 	}
 	return nil, fmt.Errorf("gemini: no image in response")
 }
