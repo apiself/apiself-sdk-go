@@ -5,7 +5,7 @@ package sdk
 // Phase 4 refactor (2026-06-09): boxes own their model catalogues and
 // stream model files directly to the shared on-disk cache without
 // routing through the manager. The shared layout is preserved -
-// {DataDir}/shared/ai-models/<family>/<id>.<ext> - so a model installed
+// {DataDir}/shared/models/<family>/<id>.<ext> - so a model installed
 // by the LLM box is reused by a future image-gen box without re-download.
 //
 // Why bypass the manager:
@@ -48,10 +48,10 @@ import (
 // Layout (matches the legacy Manager path so existing installs aren't
 // re-downloaded after this refactor):
 //
-//	{DataDir}/shared/ai-models/<family>/<id>.<ext>
-//	{DataDir}/shared/ai-models/<family>/<id>.<ext>.json     (if companion)
-//	{DataDir}/shared/ai-models/<family>/<id>.<ext>.ok       (sentinel)
-//	{DataDir}/shared/ai-models/<family>/<id>.<ext>.lock     (in-flight)
+//	{DataDir}/shared/models/<family>/<id>.<ext>
+//	{DataDir}/shared/models/<family>/<id>.<ext>.json     (if companion)
+//	{DataDir}/shared/models/<family>/<id>.<ext>.ok       (sentinel)
+//	{DataDir}/shared/models/<family>/<id>.<ext>.lock     (in-flight)
 //
 // Args:
 //   - family       : "piper", "whisper", "llm", ...
@@ -92,7 +92,8 @@ func EnsureModel(family, id, ext, url string, companionURLs []string, timeout ti
 	if dataDir == "" {
 		return "", fmt.Errorf("EnsureModel: cannot resolve data dir for this platform")
 	}
-	famDir := filepath.Join(dataDir, "shared", "ai-models", family)
+	migrateSharedLayoutOnce()
+	famDir := filepath.Join(dataDir, "shared", "models", family)
 	dest := filepath.Join(famDir, id+"."+ext)
 	sentinel := dest + ".ok"
 	lockPath := dest + ".lock"

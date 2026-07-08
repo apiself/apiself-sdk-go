@@ -92,13 +92,17 @@ func runtimeVersion(dep *BoxConfigExternalDep) string {
 	return "latest"
 }
 
-// runtimeCacheDirSeg is {DataDir}/shared/{name}/{segment}.
+// runtimeCacheDirSeg is {DataDir}/shared/runtime/{name}/{segment}.
+// Runtimes live under the shared/runtime/ group (unified 2026-07 to match the
+// Manager's RuntimeDir + keep shared/ tidy: runtime/ models/ datasets/ cache/).
+// Legacy flat shared/{name}/ installs are relocated by MigrateSharedLayout.
 func runtimeCacheDirSeg(name, segment string) (string, error) {
 	dataDir := PlatformDataDir()
 	if dataDir == "" {
 		return "", fmt.Errorf("runtime %q: cannot resolve data dir", name)
 	}
-	return filepath.Join(dataDir, "shared", name, segment), nil
+	migrateSharedLayoutOnce()
+	return filepath.Join(dataDir, "shared", "runtime", name, segment), nil
 }
 
 // rtArchiveKind returns the effective archive kind for a download (explicit or

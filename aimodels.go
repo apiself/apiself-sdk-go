@@ -2,7 +2,7 @@ package sdk
 
 // Box-side helper for accessing shared AI models managed by the manager.
 //
-// Models live in {DataDir}/shared/ai-models/{family}/{id}.{ext} and are
+// Models live in {DataDir}/shared/models/{family}/{id}.{ext} and are
 // shared across boxes - transcribe Pro, future image-gen, future LLM all
 // read from the same files. The manager owns download orchestration; this
 // helper just resolves paths and (optionally) blocks until a model is
@@ -157,7 +157,7 @@ func addManagerAuth(req *http.Request) {
 // the manager. Used as a fast pre-check; returns "" if the layout is
 // unknown for the OS.
 //
-// Layout: {DataDir}/shared/ai-models/{family}/{id}.bin (Whisper). For
+// Layout: {DataDir}/shared/models/{family}/{id}.bin (Whisper). For
 // other families we fall through and trust the manager's status response.
 // This intentionally only knows about the most common case - the ext
 // is family-specific (.safetensors, .gguf, .onnx) and lives in the
@@ -167,7 +167,7 @@ func localAIModelPath(family, id string) string {
 	if dataDir == "" {
 		return ""
 	}
-	root := filepath.Join(dataDir, "shared", "ai-models", family)
+	root := filepath.Join(dataDir, "shared", "models", family)
 	// Probe a few common extensions. Cheap, runs once at box startup.
 	for _, ext := range []string{".bin", ".safetensors", ".gguf", ".onnx", ""} {
 		candidate := filepath.Join(root, id+ext)
