@@ -58,6 +58,15 @@ type Model struct {
 	OnDisk            bool
 	AddedAt           int64 // unix seconds
 	LastUsedAt        int64 // unix seconds, 0 = never used
+	// Added 2026-07: per-model file extension override + architecture kind
+	// (sd/sdxl/flux/sd35) so a box can mix formats and pick the right engine
+	// invocation; hardware hints for the picker's "fits my hardware" gate.
+	Ext               string  // "" = use box-global fileExtension
+	Kind              string  // "sd" | "sdxl" | "flux" | "sd35" | ""
+	SpeedGPUxRealtime float64
+	RAMRequiredMB     int
+	VRAMRequiredMB    int
+	GPURequired       bool
 }
 
 // ModelStore is the helper handle. Constructed once during box startup
@@ -94,12 +103,31 @@ func NewModelStore(db *sql.DB, family string) (*ModelStore, error) {
 			on_disk              INTEGER NOT NULL DEFAULT 0,
 			added_at             INTEGER NOT NULL,
 			last_used_at         INTEGER NOT NULL DEFAULT 0,
+			ext                  TEXT NOT NULL DEFAULT '',
+			kind                 TEXT NOT NULL DEFAULT '',
+			speed_gpu_x_realtime REAL NOT NULL DEFAULT 0,
+			ram_required_mb      INTEGER NOT NULL DEFAULT 0,
+			vram_required_mb     INTEGER NOT NULL DEFAULT 0,
+			gpu_required         INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (family, id)
 		);
 		CREATE INDEX IF NOT EXISTS idx_models_family ON models(family);
 		CREATE INDEX IF NOT EXISTS idx_models_family_source ON models(family, source);
 	`); err != nil {
 		return nil, fmt.Errorf("ModelStore: migrate: %w", err)
+	}
+	// Additive migration for tables created before the 2026-07 columns landed.
+	// SQLite has no "ADD COLUMN IF NOT EXISTS"; a duplicate-column error just
+	// means the column is already there, so each ALTER is best-effort.
+	for _, col := range []string{
+		`ALTER TABLE models ADD COLUMN ext TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE models ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE models ADD COLUMN speed_gpu_x_realtime REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE models ADD COLUMN ram_required_mb INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE models ADD COLUMN vram_required_mb INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE models ADD COLUMN gpu_required INTEGER NOT NULL DEFAULT 0`,
+	} {
+		_, _ = db.Exec(col)
 	}
 	return &ModelStore{db: db, family: family}, nil
 }
@@ -128,8 +156,9 @@ func (s *ModelStore) Upsert(m Model) error {
 			id, family, source, display_name, languages_json, url,
 			companion_urls_json, size_mb, quality, license, tier_required,
 			description_short, speed_cpu_x_realtime, file_path, on_disk,
-			added_at, last_used_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			added_at, last_used_at,
+			ext, kind, speed_gpu_x_realtime, ram_required_mb, vram_required_mb, gpu_required
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(family, id) DO UPDATE SET
 			source               = excluded.source,
 			display_name         = excluded.display_name,
@@ -141,12 +170,19 @@ func (s *ModelStore) Upsert(m Model) error {
 			license              = excluded.license,
 			tier_required        = excluded.tier_required,
 			description_short    = excluded.description_short,
-			speed_cpu_x_realtime = excluded.speed_cpu_x_realtime
+			speed_cpu_x_realtime = excluded.speed_cpu_x_realtime,
+			ext                  = excluded.ext,
+			kind                 = excluded.kind,
+			speed_gpu_x_realtime = excluded.speed_gpu_x_realtime,
+			ram_required_mb      = excluded.ram_required_mb,
+			vram_required_mb     = excluded.vram_required_mb,
+			gpu_required         = excluded.gpu_required
 		`,
 		m.ID, m.Family, m.Source, m.DisplayName, string(langsJSON), m.URL,
 		string(companionsJSON), m.SizeMB, m.Quality, m.License, m.TierRequired,
 		m.DescriptionShort, m.SpeedCPUxRealtime, m.FilePath, boolToInt(m.OnDisk),
 		m.AddedAt, m.LastUsedAt,
+		m.Ext, m.Kind, m.SpeedGPUxRealtime, m.RAMRequiredMB, m.VRAMRequiredMB, boolToInt(m.GPURequired),
 	)
 	return err
 }
@@ -160,7 +196,8 @@ func (s *ModelStore) List() ([]Model, error) {
 		SELECT id, family, source, display_name, languages_json, url,
 		       companion_urls_json, size_mb, quality, license, tier_required,
 		       description_short, speed_cpu_x_realtime, file_path, on_disk,
-		       added_at, last_used_at
+		       added_at, last_used_at,
+		       ext, kind, speed_gpu_x_realtime, ram_required_mb, vram_required_mb, gpu_required
 		  FROM models
 		 WHERE family = ?
 		 ORDER BY
@@ -193,7 +230,8 @@ func (s *ModelStore) Get(id string) (*Model, error) {
 		SELECT id, family, source, display_name, languages_json, url,
 		       companion_urls_json, size_mb, quality, license, tier_required,
 		       description_short, speed_cpu_x_realtime, file_path, on_disk,
-		       added_at, last_used_at
+		       added_at, last_used_at,
+		       ext, kind, speed_gpu_x_realtime, ram_required_mb, vram_required_mb, gpu_required
 		  FROM models
 		 WHERE family = ? AND id = ?
 		 LIMIT 1`,
@@ -282,16 +320,18 @@ type rowScanner interface {
 func scanModel(r rowScanner) (Model, error) {
 	var m Model
 	var langs, companions string
-	var onDisk int
+	var onDisk, gpuRequired int
 	if err := r.Scan(
 		&m.ID, &m.Family, &m.Source, &m.DisplayName, &langs, &m.URL,
 		&companions, &m.SizeMB, &m.Quality, &m.License, &m.TierRequired,
 		&m.DescriptionShort, &m.SpeedCPUxRealtime, &m.FilePath, &onDisk,
 		&m.AddedAt, &m.LastUsedAt,
+		&m.Ext, &m.Kind, &m.SpeedGPUxRealtime, &m.RAMRequiredMB, &m.VRAMRequiredMB, &gpuRequired,
 	); err != nil {
 		return Model{}, err
 	}
 	m.OnDisk = onDisk != 0
+	m.GPURequired = gpuRequired != 0
 	_ = json.Unmarshal([]byte(langs), &m.Languages)
 	_ = json.Unmarshal([]byte(companions), &m.CompanionURLs)
 	if m.Languages == nil {

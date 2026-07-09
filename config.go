@@ -150,13 +150,25 @@ type BoxConfigModelPreset struct {
 	DisplayName       string   `json:"displayName"`
 	URL               string   `json:"url"`
 	CompanionURLs     []string `json:"companionUrls,omitempty"`
+	// Ext overrides the box-global fileExtension for this one model, so a box
+	// can mix e.g. .gguf and .safetensors in the same family. Empty = use the
+	// box-level BoxConfigModels.FileExtension.
+	Ext string `json:"ext,omitempty"`
+	// Kind is the model architecture, so the box can pick the right engine
+	// invocation: "sd" (SD1.x), "sdxl", "flux", "sd35". Empty = box default.
+	Kind              string   `json:"kind,omitempty"`
 	SizeMB            int      `json:"sizeMb,omitempty"`
 	Languages         []string `json:"languages,omitempty"`
 	Quality           int      `json:"quality,omitempty"`
 	SpeedCPUxRealtime float64  `json:"speedCpuXRealtime,omitempty"`
-	DescriptionShort  string   `json:"descriptionShort,omitempty"`
-	License           string   `json:"license,omitempty"`
-	TierRequired      string   `json:"tierRequired,omitempty"`
+	SpeedGPUxRealtime float64  `json:"speedGpuXRealtime,omitempty"`
+	// Hardware hints for the picker's "fits my hardware" gate. 0 = unknown.
+	RAMRequiredMB  int  `json:"ramRequiredMb,omitempty"`
+	VRAMRequiredMB int  `json:"vramRequiredMb,omitempty"`
+	GPURequired    bool `json:"gpuRequired,omitempty"`
+	DescriptionShort string `json:"descriptionShort,omitempty"`
+	License          string `json:"license,omitempty"`
+	TierRequired     string `json:"tierRequired,omitempty"`
 }
 
 // BoxConfigProviders declares a BYOK cloud provider catalogue owned by
@@ -237,12 +249,18 @@ func (c *BoxConfigFile) PresetsAsModels() []Model {
 			Languages:         p.Languages,
 			URL:               p.URL,
 			CompanionURLs:     p.CompanionURLs,
+			Ext:               p.Ext,
+			Kind:              p.Kind,
 			SizeMB:            p.SizeMB,
 			Quality:           p.Quality,
 			License:           p.License,
 			TierRequired:      tier,
 			DescriptionShort:  p.DescriptionShort,
 			SpeedCPUxRealtime: p.SpeedCPUxRealtime,
+			SpeedGPUxRealtime: p.SpeedGPUxRealtime,
+			RAMRequiredMB:     p.RAMRequiredMB,
+			VRAMRequiredMB:    p.VRAMRequiredMB,
+			GPURequired:       p.GPURequired,
 		})
 	}
 	return out

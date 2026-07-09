@@ -111,6 +111,12 @@ func (h *modelHandlers) catalog(w http.ResponseWriter, r *http.Request) {
 			"license":           m.License,
 			"tierRequired":      m.TierRequired,
 			"onDisk":            m.OnDisk,
+			"ext":               m.Ext,
+			"kind":              m.Kind,
+			"speedGpuXRealtime": m.SpeedGPUxRealtime,
+			"ramRequiredMb":     m.RAMRequiredMB,
+			"vramRequiredMb":    m.VRAMRequiredMB,
+			"gpuRequired":       m.GPURequired,
 		})
 	}
 	h.ok(w, map[string]any{
@@ -144,7 +150,13 @@ func (h *modelHandlers) install(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, http.StatusNotFound, "model.not_found")
 		return
 	}
-	path, err := EnsureModel(h.cfg.Family, m.ID, h.cfg.FileExtension, m.URL, m.CompanionURLs, h.cfg.InstallTimeout)
+	// Per-model extension override lets one family mix e.g. .gguf and
+	// .safetensors; fall back to the box-global extension when unset.
+	ext := m.Ext
+	if ext == "" {
+		ext = h.cfg.FileExtension
+	}
+	path, err := EnsureModel(h.cfg.Family, m.ID, ext, m.URL, m.CompanionURLs, h.cfg.InstallTimeout)
 	if err != nil {
 		Log.Warn("models.install_failed", "id", m.ID, "err", err.Error())
 		h.fail(w, http.StatusInternalServerError, "model.install_failed")
