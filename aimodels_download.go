@@ -135,10 +135,18 @@ func EnsureModel(family, id, ext, url string, companionURLs []string, timeout ti
 	tmp := dest + ".download"
 	defer os.Remove(tmp)
 
-	if err := downloadFile(url, tmp, timeout); err != nil {
+	// Live download progress over SSE - mirrors the runtime rtProgressWriter
+	// pipeline so the model card shows a real % bar instead of an
+	// indeterminate spinner (docs/box-ai-studio-spec.md).
+	mdEmit(family, id, "download", 0)
+	if err := downloadFileProgress(url, tmp, timeout, func(pct int) {
+		mdEmit(family, id, "download", pct)
+	}); err != nil {
+		mdEmit(family, id, "failed", 0)
 		return "", fmt.Errorf("EnsureModel: primary download %s: %w", url, err)
 	}
 	if err := os.Rename(tmp, dest); err != nil {
+		mdEmit(family, id, "failed", 0)
 		return "", fmt.Errorf("EnsureModel: rename: %w", err)
 	}
 
@@ -169,7 +177,75 @@ func EnsureModel(family, id, ext, url string, companionURLs []string, timeout ti
 		// (Logger not always wired this deep in the SDK; swallow.)
 		_ = err
 	}
+	mdEmit(family, id, "ready", 100)
 	return dest, nil
+}
+
+// mdEmit publishes model download progress over SSE. "model" is the
+// dedicated event AIModelPicker listens to; "dep" mirrors the runtime
+// pipeline so a generic <BoxDependencies> card can also reflect it.
+// phase: "download" | "ready" | "failed"; pct 0..100.
+func mdEmit(family, id, phase string, pct int) {
+	PublishEvent("model", map[string]any{"family": family, "id": id, "phase": phase, "pct": pct})
+	PublishEvent("dep", map[string]any{"kind": "model", "name": id, "phase": phase, "pct": pct})
+}
+
+// mdProgressWriter is the model-download counterpart of rtProgressWriter
+// (runtime.go): emits a percentage on a 150ms tick or whenever it advances.
+type mdProgressWriter struct {
+	emit    func(pct int)
+	total   int64
+	seen    int64
+	last    time.Time
+	lastPct int
+}
+
+func (p *mdProgressWriter) Write(b []byte) (int, error) {
+	n := len(b)
+	p.seen += int64(n)
+	pct := 0
+	if p.total > 0 {
+		pct = int(p.seen * 100 / p.total)
+	}
+	if time.Since(p.last) >= 150*time.Millisecond || pct > p.lastPct {
+		p.last = time.Now()
+		p.lastPct = pct
+		p.emit(pct)
+	}
+	return n, nil
+}
+
+// downloadFileProgress is downloadFile plus a byte-progress callback. Kept
+// separate so the companion path (small config files) stays on the plain,
+// progress-free downloadFile.
+func downloadFileProgress(url, dest string, timeout time.Duration, onProgress func(pct int)) error {
+	client := &http.Client{Timeout: timeout}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "apiself-sdk-go/1.0 (model-fetch)")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("http %d for %s", resp.StatusCode, url)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	pw := &mdProgressWriter{emit: onProgress, total: resp.ContentLength, last: time.Now()}
+	if _, err := io.Copy(io.MultiWriter(f, pw), resp.Body); err != nil {
+		return err
+	}
+	return nil
 }
 
 // acquireDownloadLock atomically creates the lock file. Returns true
