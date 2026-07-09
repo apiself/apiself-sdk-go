@@ -17,11 +17,48 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
 // GatewayBoxID is the canonical id of the AI Gateway box.
 const GatewayBoxID = "apiself-box-ai-gateway"
+
+// GatewayResolution is how a model should be run, from the Gateway's resolve
+// endpoint. Mode is "local" (specialist runs its own engine on FilePath) or
+// "cloud" (call the Gateway route; Provider holds the key, never exposed).
+type GatewayResolution struct {
+	Mode       string            `json:"mode"`
+	Model      string            `json:"model"`
+	FilePath   string            `json:"filePath"`
+	Kind       string            `json:"kind"`
+	Companions map[string]string `json:"companions"`
+	Provider   string            `json:"provider"`
+}
+
+// GatewayResolve asks the Gateway how to run a model of the given capability.
+// Used by a specialist box's backend: local → run own engine with the
+// returned path/kind/companions; cloud → call GatewayImage (or route).
+func GatewayResolve(ctx context.Context, capability, model string) (*GatewayResolution, error) {
+	path := "/api/ai-gateway/resolve?capability=" + url.QueryEscape(capability) + "&model=" + url.QueryEscape(model)
+	resp, err := CallBox(ctx, GatewayBoxID, http.MethodGet, path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var env struct {
+		Success bool              `json:"success"`
+		Data    GatewayResolution `json:"data"`
+		Error   string            `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return nil, fmt.Errorf("gateway resolve decode: %w", err)
+	}
+	if !env.Success {
+		return nil, fmt.Errorf("gateway resolve: %s", env.Error)
+	}
+	return &env.Data, nil
+}
 
 // GatewayAvailable reports whether the AI Gateway box is installed + running.
 // Cheap manager-local lookup; use it to decide whether to prefer the Gateway
