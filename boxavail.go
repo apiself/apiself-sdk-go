@@ -161,8 +161,13 @@ func CallBox(ctx context.Context, boxID, method, path string, body io.Reader, co
 	if tok := os.Getenv("APISELF_SESSION_TOKEN"); tok != "" {
 		req.Header.Set("X-APISELF-Box-Token", tok)
 	}
-	// The manager appends X-APISelf-Caller automatically when this request
-	// is proxied through it. We don't set it here - the callee should not
-	// trust caller-set values.
+	// Identify the calling box so the callee can attribute the request (e.g.
+	// the AI Gateway's Costs page "by source"). The manager's box proxy does
+	// not add a caller header, so the caller sends its own id. Set only when a
+	// real box id is known (InitBox -> SetAuthBoxID); the callee treats this as
+	// a hint, not a trust boundary.
+	if authBoxID != "" && authBoxID != "apiself-box-unknown" {
+		req.Header.Set("X-APISelf-Source-Box", authBoxID)
+	}
 	return http.DefaultClient.Do(req)
 }
