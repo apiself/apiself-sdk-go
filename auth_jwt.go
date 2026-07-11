@@ -37,6 +37,12 @@ type SessionClaims struct {
 // Vracia (claims, nil) pri úspešnej validácii alebo (nil, err) inak.
 // Caller (sdk.GetUser) interpretuje err ako "neprihlásený" - žiadne 401
 // sa neposiela automaticky, to je úloha RequireAuth middleware-u.
+
+// AuthBoxID is the fixed id of the auth box, used as the session-JWT issuer.
+// Single source of truth (matches BOX_AUTH in the sdk-ui boxIds registry) so a
+// rename is one edit. Mirrors GatewayBoxID / NotifyBoxID.
+const AuthBoxID = "apiself-box-auth"
+
 func ValidateJWT(boxID, token string) (*SessionClaims, error) {
 	if token == "" {
 		return nil, errors.New("empty token")
@@ -65,7 +71,7 @@ func ValidateJWT(boxID, token string) (*SessionClaims, error) {
 						return pub, nil
 					})
 					if err2 == nil && t2.Valid {
-						if claims2.Issuer != "apiself-box-auth" {
+						if claims2.Issuer != AuthBoxID {
 							return nil, fmt.Errorf("unexpected issuer: %s", claims2.Issuer)
 						}
 						return claims2, nil
@@ -78,7 +84,7 @@ func ValidateJWT(boxID, token string) (*SessionClaims, error) {
 	if !t.Valid {
 		return nil, errors.New("token invalid")
 	}
-	if claims.Issuer != "apiself-box-auth" {
+	if claims.Issuer != AuthBoxID {
 		return nil, fmt.Errorf("unexpected issuer: %s", claims.Issuer)
 	}
 	return claims, nil
