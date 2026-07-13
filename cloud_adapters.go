@@ -1072,6 +1072,129 @@ func (klingVideo) GenerateVideo(ctx context.Context, key string, req VideoReques
 	}
 }
 
+// ── Runway (video — direct API) ──────────────────────────────────────────
+//
+// Runway is first-party for its Gen models. Auth is a simple Bearer key + a
+// pinned X-Runway-Version header. Create returns a task id; poll /v1/tasks/{id}
+// until SUCCEEDED, then the video URL is output[0]. Text-to-video omits
+// promptImage. API shape from docs.dev.runwayml.com/guides/using-the-api.
+func init() { RegisterCloudAdapter(runwayVideo{}) }
+
+type runwayVideo struct{}
+
+func (runwayVideo) ID() string         { return "runway" }
+func (runwayVideo) Capability() string { return "video" }
+
+func (runwayVideo) Models(_ context.Context, _ string) ([]CloudModel, error) {
+	return []CloudModel{
+		{ID: "gen4_turbo", Label: "Gen-4 Turbo"},
+		{ID: "gen3a_turbo", Label: "Gen-3 Alpha Turbo"},
+	}, nil
+}
+
+// runwayRatio maps a plain aspect ratio to Runway's pixel-ratio string.
+func runwayRatio(ar string) string {
+	switch ar {
+	case "9:16":
+		return "720:1280"
+	case "1:1":
+		return "960:960"
+	case "4:3":
+		return "1104:832"
+	case "3:4":
+		return "832:1104"
+	case "21:9":
+		return "1584:672"
+	default: // 16:9 and anything unknown
+		return "1280:720"
+	}
+}
+
+func (runwayVideo) GenerateVideo(ctx context.Context, key string, req VideoRequest) ([]byte, string, error) {
+	if key == "" {
+		return nil, "", fmt.Errorf("runway: no API key configured")
+	}
+	model := req.Model
+	if model == "" {
+		model = "gen4_turbo"
+	}
+	const ver = "2024-11-06"
+	setHdr := func(h http.Header) {
+		h.Set("Authorization", "Bearer "+key)
+		h.Set("X-Runway-Version", ver)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"model": model, "promptText": req.Prompt,
+		"ratio": runwayRatio(vAspect(req)), "duration": vDurationSec(req),
+	})
+	sr, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.dev.runwayml.com/v1/image_to_video", bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	sr.Header.Set("Content-Type", "application/json")
+	setHdr(sr.Header)
+	cl := &http.Client{Timeout: 30 * time.Second}
+	resp, err := cl.Do(sr)
+	if err != nil {
+		return nil, "", err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	var sub struct {
+		ID    string `json:"id"`
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &sub)
+	if resp.StatusCode >= 300 || sub.ID == "" {
+		msg := sub.Error
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		}
+		return nil, "", fmt.Errorf("runway: %s", msg)
+	}
+	pollURL := "https://api.dev.runwayml.com/v1/tasks/" + url.PathEscape(sub.ID)
+	deadline := time.Now().Add(6 * time.Minute)
+	for {
+		pr, _ := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+		setHdr(pr.Header)
+		presp, err := cl.Do(pr)
+		if err != nil {
+			return nil, "", err
+		}
+		pbody, _ := io.ReadAll(io.LimitReader(presp.Body, 4<<20))
+		presp.Body.Close()
+		var pv struct {
+			Status  string   `json:"status"`
+			Output  []string `json:"output"`
+			Failure string   `json:"failure"`
+		}
+		_ = json.Unmarshal(pbody, &pv)
+		switch pv.Status {
+		case "SUCCEEDED":
+			if len(pv.Output) == 0 || pv.Output[0] == "" {
+				return nil, "", fmt.Errorf("runway: succeeded but no output")
+			}
+			vid, err := downloadBytes(ctx, pv.Output[0])
+			return vid, "video/mp4", err
+		case "FAILED":
+			msg := pv.Failure
+			if msg == "" {
+				msg = "failed"
+			}
+			return nil, "", fmt.Errorf("runway: %s", msg)
+		}
+		if time.Now().After(deadline) {
+			return nil, "", fmt.Errorf("runway: timed out waiting for video")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
 // downloadBytes fetches a URL and returns its body (used to pull the final
 // image/video off a provider's signed result URL).
 func downloadBytes(ctx context.Context, rawURL string) ([]byte, error) {
