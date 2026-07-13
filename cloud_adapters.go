@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // CloudModel is one model a provider offers.
@@ -932,6 +934,140 @@ func (geminiImages) GenerateVideo(ctx context.Context, key string, req VideoRequ
 		case <-ctx.Done():
 			return nil, "", ctx.Err()
 		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+// ── Kling AI (video — direct, JWT auth) ──────────────────────────────────
+//
+// Kling authenticates with a short-lived JWT signed (HS256) from an Access Key
+// + Secret Key, sent as "Authorization: Bearer <jwt>". The gateway vault holds
+// one string per provider, so the configured "kling" key is entered as
+// "accessKey:secretKey". NOTE: the create/query request+response shapes below
+// follow Kling's documented text2video API but were not doc-verified here
+// (their docs are bot-blocked) — worth a runtime check of field names.
+func init() { RegisterCloudAdapter(klingVideo{}) }
+
+type klingVideo struct{}
+
+func (klingVideo) ID() string         { return "kling" }
+func (klingVideo) Capability() string { return "video" }
+
+func (klingVideo) Models(_ context.Context, _ string) ([]CloudModel, error) {
+	return []CloudModel{
+		{ID: "kling-v2-master", Label: "Kling v2 Master"},
+		{ID: "kling-v1-6", Label: "Kling v1.6"},
+		{ID: "kling-v1", Label: "Kling v1"},
+	}, nil
+}
+
+// klingJWT builds a short-lived HS256 token from "ak:sk".
+func klingJWT(key string) (string, error) {
+	ak, sk, ok := strings.Cut(key, ":")
+	if !ok || ak == "" || sk == "" {
+		return "", fmt.Errorf("kling: key must be in the form accessKey:secretKey")
+	}
+	now := time.Now()
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"iss": ak,
+		"exp": now.Add(30 * time.Minute).Unix(),
+		"nbf": now.Add(-5 * time.Second).Unix(),
+	})
+	return tok.SignedString([]byte(sk))
+}
+
+func (klingVideo) GenerateVideo(ctx context.Context, key string, req VideoRequest) ([]byte, string, error) {
+	token, err := klingJWT(key)
+	if err != nil {
+		return nil, "", err
+	}
+	model := req.Model
+	if model == "" {
+		model = "kling-v1"
+	}
+	const base = "https://api-singapore.klingai.com/v1/videos/text2video"
+	body, _ := json.Marshal(map[string]any{
+		"model_name": model, "prompt": req.Prompt,
+		"duration": strconv.Itoa(vDurationSec(req)), "aspect_ratio": vAspect(req),
+		"mode": "std", "cfg_scale": 0.5,
+	})
+	sr, err := http.NewRequestWithContext(ctx, http.MethodPost, base, bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	sr.Header.Set("Content-Type", "application/json")
+	sr.Header.Set("Authorization", "Bearer "+token)
+	cl := &http.Client{Timeout: 30 * time.Second}
+	resp, err := cl.Do(sr)
+	if err != nil {
+		return nil, "", err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	var sub struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			TaskID string `json:"task_id"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &sub)
+	if resp.StatusCode >= 300 || sub.Data.TaskID == "" {
+		msg := sub.Message
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		}
+		return nil, "", fmt.Errorf("kling: %s", msg)
+	}
+	pollURL := base + "/" + url.PathEscape(sub.Data.TaskID)
+	deadline := time.Now().Add(6 * time.Minute)
+	for {
+		// Re-sign per poll so a long job never uses an expired token.
+		ptok, terr := klingJWT(key)
+		if terr != nil {
+			return nil, "", terr
+		}
+		pr, _ := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+		pr.Header.Set("Authorization", "Bearer "+ptok)
+		presp, err := cl.Do(pr)
+		if err != nil {
+			return nil, "", err
+		}
+		pbody, _ := io.ReadAll(io.LimitReader(presp.Body, 4<<20))
+		presp.Body.Close()
+		var pv struct {
+			Data struct {
+				TaskStatus    string `json:"task_status"`
+				TaskStatusMsg string `json:"task_status_msg"`
+				TaskResult    struct {
+					Videos []struct {
+						URL string `json:"url"`
+					} `json:"videos"`
+				} `json:"task_result"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(pbody, &pv)
+		switch pv.Data.TaskStatus {
+		case "succeed":
+			if len(pv.Data.TaskResult.Videos) == 0 || pv.Data.TaskResult.Videos[0].URL == "" {
+				return nil, "", fmt.Errorf("kling: succeeded but no video url")
+			}
+			vid, err := downloadBytes(ctx, pv.Data.TaskResult.Videos[0].URL)
+			return vid, "video/mp4", err
+		case "failed":
+			msg := pv.Data.TaskStatusMsg
+			if msg == "" {
+				msg = "failed"
+			}
+			return nil, "", fmt.Errorf("kling: %s", msg)
+		}
+		if time.Now().After(deadline) {
+			return nil, "", fmt.Errorf("kling: timed out waiting for video")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(3 * time.Second):
 		}
 	}
 }
