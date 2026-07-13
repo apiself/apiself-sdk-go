@@ -105,3 +105,81 @@ func GatewayImage(ctx context.Context, model, prompt, size string) ([]byte, erro
 	}
 	return data, nil
 }
+
+// GatewayVideo routes a text-to-video generation through the Gateway. Returns
+// the raw video bytes + its content type (usually "video/mp4"). Blocking:
+// video generation runs tens of seconds to minutes (the Gateway submits, polls
+// the provider, downloads the result). Same fallback semantics as GatewayImage.
+func GatewayVideo(ctx context.Context, model, prompt, aspectRatio string, durationSec int, resolution string) ([]byte, string, error) {
+	payload, _ := json.Marshal(map[string]any{
+		"capability": "video",
+		"model":      model,
+		"request": map[string]any{
+			"prompt": prompt, "aspect_ratio": aspectRatio,
+			"duration": durationSec, "resolution": resolution,
+		},
+	})
+	resp, err := CallBox(ctx, GatewayBoxID, http.MethodPost, "/api/ai-gateway/route",
+		bytes.NewReader(payload), "application/json")
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	var env struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DataB64  string `json:"data_b64"`
+			MimeType string `json:"mime_type"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return nil, "", fmt.Errorf("gateway route decode: %w", err)
+	}
+	if !env.Success {
+		return nil, "", fmt.Errorf("gateway route: %s", env.Error)
+	}
+	data, err := base64.StdEncoding.DecodeString(env.Data.DataB64)
+	if err != nil || len(data) == 0 {
+		return nil, "", fmt.Errorf("gateway route: empty video")
+	}
+	ct := env.Data.MimeType
+	if ct == "" {
+		ct = "video/mp4"
+	}
+	return data, ct, nil
+}
+
+// GatewayTranscribe routes a speech-to-text request through the Gateway. The
+// audio bytes are base64-encoded in the payload; returns the transcript text.
+// Same fallback semantics as GatewayImage.
+func GatewayTranscribe(ctx context.Context, model string, audio []byte, filename, language string) (string, error) {
+	payload, _ := json.Marshal(map[string]any{
+		"capability": "transcribe",
+		"model":      model,
+		"request": map[string]any{
+			"audio_b64": base64.StdEncoding.EncodeToString(audio),
+			"filename":  filename, "language": language,
+		},
+	})
+	resp, err := CallBox(ctx, GatewayBoxID, http.MethodPost, "/api/ai-gateway/route",
+		bytes.NewReader(payload), "application/json")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var env struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Text string `json:"text"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return "", fmt.Errorf("gateway transcribe decode: %w", err)
+	}
+	if !env.Success {
+		return "", fmt.Errorf("gateway transcribe: %s", env.Error)
+	}
+	return env.Data.Text, nil
+}
