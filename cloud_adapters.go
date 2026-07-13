@@ -18,8 +18,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -273,4 +276,222 @@ func (geminiImages) Generate(ctx context.Context, key string, req ImageRequest) 
 		return nil, fmt.Errorf("gemini: model returned text, no image — %s", msg)
 	}
 	return nil, fmt.Errorf("gemini: no image in response")
+}
+
+// parseImageSize splits an "WxH" size (e.g. "1024x1024") into pixels, falling
+// back to 1024×1024 when the value is empty or malformed.
+func parseImageSize(size string) (w, h int) {
+	w, h = 1024, 1024
+	if i := strings.IndexAny(size, "xX"); i > 0 {
+		if a, err := strconv.Atoi(strings.TrimSpace(size[:i])); err == nil && a > 0 {
+			w = a
+		}
+		if b, err := strconv.Atoi(strings.TrimSpace(size[i+1:])); err == nil && b > 0 {
+			h = b
+		}
+	}
+	return
+}
+
+// ── Stability AI (images — v2beta stable-image) ──────────────────────────
+
+func init() { RegisterCloudAdapter(stabilityImages{}) }
+
+// stabilityImages implements ImageAdapter against Stability's v2beta
+// stable-image API. Ultra/Core have dedicated endpoints; the SD3.5 family
+// shares /generate/sd3 with a `model` form field. Returns raw PNG bytes
+// (Accept: image/*).
+type stabilityImages struct{}
+
+func (stabilityImages) ID() string         { return "stability" }
+func (stabilityImages) Capability() string { return "image" }
+
+func (stabilityImages) Models(_ context.Context, _ string) ([]CloudModel, error) {
+	return []CloudModel{
+		{ID: "stable-image-ultra", Label: "Stable Image Ultra"},
+		{ID: "stable-image-core", Label: "Stable Image Core"},
+		{ID: "sd3.5-large", Label: "Stable Diffusion 3.5 Large"},
+		{ID: "sd3.5-medium", Label: "Stable Diffusion 3.5 Medium"},
+	}, nil
+}
+
+func (stabilityImages) Generate(ctx context.Context, key string, req ImageRequest) ([]byte, error) {
+	if key == "" {
+		return nil, fmt.Errorf("stability: no API key configured")
+	}
+	model := req.Model
+	if model == "" {
+		model = "stable-image-core"
+	}
+	// Endpoint + optional sd3 model field, chosen from the model id.
+	var path, sd3Model string
+	switch {
+	case strings.Contains(model, "ultra"):
+		path = "ultra"
+	case strings.Contains(model, "core"):
+		path = "core"
+	default:
+		path, sd3Model = "sd3", model
+	}
+	// Stability wants multipart/form-data (even without an image field).
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("prompt", req.Prompt)
+	_ = mw.WriteField("output_format", "png")
+	if sd3Model != "" {
+		_ = mw.WriteField("model", sd3Model)
+	}
+	_ = mw.Close()
+
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.stability.ai/v2beta/stable-image/generate/"+path, &buf)
+	if err != nil {
+		return nil, err
+	}
+	hr.Header.Set("Content-Type", mw.FormDataContentType())
+	hr.Header.Set("Authorization", "Bearer "+key)
+	hr.Header.Set("Accept", "image/*") // raw bytes back, not base64 JSON
+	cl := &http.Client{Timeout: 120 * time.Second}
+	res, err := cl.Do(hr)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 32<<20))
+	if res.StatusCode != http.StatusOK {
+		// Errors come back as JSON {errors:[...]} or {message}.
+		var e struct {
+			Errors  []string `json:"errors"`
+			Message string   `json:"message"`
+			Name    string   `json:"name"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		msg := e.Message
+		if msg == "" && len(e.Errors) > 0 {
+			msg = strings.Join(e.Errors, "; ")
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", res.StatusCode)
+		}
+		return nil, fmt.Errorf("stability: %s", msg)
+	}
+	return raw, nil
+}
+
+// ── Black Forest Labs (images — FLUX, async poll) ────────────────────────
+
+func init() { RegisterCloudAdapter(bflImages{}) }
+
+// bflImages implements ImageAdapter against the BFL (FLUX) API. Generation is
+// asynchronous: POST returns a request id + polling_url; we poll until the
+// result carries a sample URL, then download the image. The blocking
+// ImageAdapter.Generate contract is satisfied by doing the poll+download here.
+type bflImages struct{}
+
+func (bflImages) ID() string         { return "bfl" }
+func (bflImages) Capability() string { return "image" }
+
+func (bflImages) Models(_ context.Context, _ string) ([]CloudModel, error) {
+	return []CloudModel{
+		{ID: "flux-pro-1.1", Label: "FLUX Pro 1.1"},
+		{ID: "flux-pro", Label: "FLUX Pro"},
+		{ID: "flux-dev", Label: "FLUX Dev"},
+	}, nil
+}
+
+func (bflImages) Generate(ctx context.Context, key string, req ImageRequest) ([]byte, error) {
+	if key == "" {
+		return nil, fmt.Errorf("bfl: no API key configured")
+	}
+	model := req.Model
+	if model == "" {
+		model = "flux-pro-1.1"
+	}
+	w, h := parseImageSize(req.Size)
+	body, _ := json.Marshal(map[string]any{"prompt": req.Prompt, "width": w, "height": h})
+	sr, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.bfl.ai/v1/"+model, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	sr.Header.Set("Content-Type", "application/json")
+	sr.Header.Set("x-key", key) // BFL uses x-key, not Bearer
+	cl := &http.Client{Timeout: 30 * time.Second}
+	res, err := cl.Do(sr)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("bfl: submit HTTP %d %s", res.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var sub struct {
+		ID         string `json:"id"`
+		PollingURL string `json:"polling_url"`
+	}
+	if json.Unmarshal(raw, &sub) != nil || sub.ID == "" {
+		return nil, fmt.Errorf("bfl: no request id in submit response")
+	}
+	pollURL := sub.PollingURL
+	if pollURL == "" {
+		pollURL = "https://api.bfl.ai/v1/get_result?id=" + url.QueryEscape(sub.ID)
+	}
+	// Poll until Ready (or Error), up to ~90s.
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		pr, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		pr.Header.Set("x-key", key)
+		presp, err := cl.Do(pr)
+		if err != nil {
+			return nil, err
+		}
+		pbody, _ := io.ReadAll(io.LimitReader(presp.Body, 4<<20))
+		presp.Body.Close()
+		var pv struct {
+			Status string `json:"status"`
+			Result struct {
+				Sample string `json:"sample"`
+			} `json:"result"`
+		}
+		_ = json.Unmarshal(pbody, &pv)
+		switch pv.Status {
+		case "Ready":
+			if pv.Result.Sample == "" {
+				return nil, fmt.Errorf("bfl: ready but no image url")
+			}
+			return downloadBytes(ctx, pv.Result.Sample)
+		case "Error", "Content Moderated", "Request Moderated", "Failed":
+			return nil, fmt.Errorf("bfl: generation %s", pv.Status)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("bfl: timed out waiting for image")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+}
+
+// downloadBytes fetches a URL and returns its body (used to pull the final
+// image/video off a provider's signed result URL).
+func downloadBytes(ctx context.Context, rawURL string) ([]byte, error) {
+	dr, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	cl := &http.Client{Timeout: 120 * time.Second}
+	res, err := cl.Do(dr)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download: HTTP %d", res.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(res.Body, 64<<20))
 }
