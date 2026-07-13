@@ -79,6 +79,28 @@ func CloudAdapterByID(id string) (CloudAdapter, bool) {
 	return a, ok
 }
 
+// AdapterSupports reports whether an adapter can serve a capability, by checking
+// the capability sub-interface it implements. One adapter may implement several
+// (e.g. the gemini adapter does both image and video), so this — not the single
+// Capability() string — is the authoritative "can it do X" check. Falls back to
+// the Capability() string for capabilities without a dedicated sub-interface yet
+// (chat/tts/transcribe are served differently today).
+func AdapterSupports(a CloudAdapter, capability string) bool {
+	if a == nil {
+		return false
+	}
+	switch capability {
+	case "image":
+		_, ok := a.(ImageAdapter)
+		return ok
+	case "video":
+		_, ok := a.(VideoAdapter)
+		return ok
+	default:
+		return a.Capability() == capability
+	}
+}
+
 // CloudAdapters returns all registered adapters sorted by id (stable order).
 func CloudAdapters() []CloudAdapter {
 	cloudMu.RLock()
@@ -735,12 +757,110 @@ func falQueueVideo(ctx context.Context, key, falModel string, input map[string]a
 	return vid, "video/mp4", err
 }
 
+// ── Google Gemini Veo (video — direct predictLongRunning API) ────────────
+//
+// The gemini adapter (registered above for images) ALSO implements VideoAdapter
+// via Veo. Submit a long-running operation, poll until done, then download the
+// returned file URI (which itself requires the API-key header). One "gemini"
+// adapter thus serves image + video — AdapterSupports keys off the sub-interface.
+func (geminiImages) GenerateVideo(ctx context.Context, key string, req VideoRequest) ([]byte, string, error) {
+	if key == "" {
+		return nil, "", fmt.Errorf("gemini: no API key configured")
+	}
+	model := req.Model
+	if model == "" {
+		model = "veo-3.1-generate-preview"
+	}
+	body, _ := json.Marshal(map[string]any{
+		"instances":  []map[string]any{{"prompt": req.Prompt}},
+		"parameters": map[string]any{"aspectRatio": vAspect(req)},
+	})
+	sr, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://generativelanguage.googleapis.com/v1beta/models/"+model+":predictLongRunning", bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	sr.Header.Set("Content-Type", "application/json")
+	sr.Header.Set("x-goog-api-key", key)
+	cl := &http.Client{Timeout: 30 * time.Second}
+	resp, err := cl.Do(sr)
+	if err != nil {
+		return nil, "", err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("gemini: submit HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var sub struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(raw, &sub) != nil || sub.Name == "" {
+		return nil, "", fmt.Errorf("gemini: no operation name in response")
+	}
+	pollURL := "https://generativelanguage.googleapis.com/v1beta/" + sub.Name
+	deadline := time.Now().Add(6 * time.Minute)
+	for {
+		pr, _ := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+		pr.Header.Set("x-goog-api-key", key)
+		presp, err := cl.Do(pr)
+		if err != nil {
+			return nil, "", err
+		}
+		pbody, _ := io.ReadAll(io.LimitReader(presp.Body, 4<<20))
+		presp.Body.Close()
+		var pv struct {
+			Done  bool `json:"done"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Response struct {
+				GVR struct {
+					Samples []struct {
+						Video struct {
+							URI string `json:"uri"`
+						} `json:"video"`
+					} `json:"generatedSamples"`
+				} `json:"generateVideoResponse"`
+			} `json:"response"`
+		}
+		_ = json.Unmarshal(pbody, &pv)
+		if pv.Done {
+			if pv.Error != nil && pv.Error.Message != "" {
+				return nil, "", fmt.Errorf("gemini: %s", pv.Error.Message)
+			}
+			if len(pv.Response.GVR.Samples) == 0 || pv.Response.GVR.Samples[0].Video.URI == "" {
+				return nil, "", fmt.Errorf("gemini: done but no video uri")
+			}
+			vid, err := downloadBytesHeader(ctx, pv.Response.GVR.Samples[0].Video.URI, "x-goog-api-key", key)
+			return vid, "video/mp4", err
+		}
+		if time.Now().After(deadline) {
+			return nil, "", fmt.Errorf("gemini: timed out waiting for video")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
 // downloadBytes fetches a URL and returns its body (used to pull the final
 // image/video off a provider's signed result URL).
 func downloadBytes(ctx context.Context, rawURL string) ([]byte, error) {
+	return downloadBytesHeader(ctx, rawURL, "", "")
+}
+
+// downloadBytesHeader is downloadBytes with an optional auth header (e.g. Google
+// file URIs need x-goog-api-key to download).
+func downloadBytesHeader(ctx context.Context, rawURL, hKey, hVal string) ([]byte, error) {
 	dr, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
+	}
+	if hKey != "" {
+		dr.Header.Set(hKey, hVal)
 	}
 	cl := &http.Client{Timeout: 120 * time.Second}
 	res, err := cl.Do(dr)
