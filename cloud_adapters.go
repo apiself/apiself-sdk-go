@@ -56,6 +56,20 @@ type ImageAdapter interface {
 	Generate(ctx context.Context, key string, req ImageRequest) (png []byte, err error)
 }
 
+// TranscribeRequest is the capability-specific payload for speech-to-text.
+type TranscribeRequest struct {
+	Model    string
+	Audio    []byte // the audio file bytes
+	Filename string // e.g. "audio.mp3" — provider infers format from extension
+	Language string // optional ISO-639-1 code, e.g. "sk"
+}
+
+// TranscribeAdapter is a CloudAdapter that can transcribe audio to text.
+type TranscribeAdapter interface {
+	CloudAdapter
+	Transcribe(ctx context.Context, key string, req TranscribeRequest) (text string, err error)
+}
+
 // ── registry ─────────────────────────────────────────────────────────────
 
 var (
@@ -95,6 +109,9 @@ func AdapterSupports(a CloudAdapter, capability string) bool {
 		return ok
 	case "video":
 		_, ok := a.(VideoAdapter)
+		return ok
+	case "transcribe":
+		_, ok := a.(TranscribeAdapter)
 		return ok
 	default:
 		return a.Capability() == capability
@@ -182,6 +199,79 @@ func (openAIImages) Generate(ctx context.Context, key string, req ImageRequest) 
 		return nil, fmt.Errorf("openai: empty response")
 	}
 	return base64.StdEncoding.DecodeString(out.Data[0].B64)
+}
+
+// ── OpenAI (transcribe — Whisper / gpt-4o-transcribe) ────────────────────
+//
+// The openai adapter (registered above for images) also implements
+// TranscribeAdapter: POST the audio as multipart/form-data to
+// /v1/audio/transcriptions and read back the plain text. One "openai" adapter
+// serves image + transcribe — AdapterSupports keys off the sub-interface.
+func (openAIImages) Transcribe(ctx context.Context, key string, req TranscribeRequest) (string, error) {
+	if key == "" {
+		return "", fmt.Errorf("openai: no API key configured")
+	}
+	if len(req.Audio) == 0 {
+		return "", fmt.Errorf("openai: no audio provided")
+	}
+	model := req.Model
+	if model == "" {
+		model = "gpt-4o-transcribe"
+	}
+	filename := req.Filename
+	if filename == "" {
+		filename = "audio.mp3"
+	}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return "", err
+	}
+	if _, err := fw.Write(req.Audio); err != nil {
+		return "", err
+	}
+	_ = mw.WriteField("model", model)
+	_ = mw.WriteField("response_format", "json")
+	if req.Language != "" {
+		_ = mw.WriteField("language", req.Language)
+	}
+	_ = mw.Close()
+
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.openai.com/v1/audio/transcriptions", &buf)
+	if err != nil {
+		return "", err
+	}
+	hr.Header.Set("Content-Type", mw.FormDataContentType())
+	hr.Header.Set("Authorization", "Bearer "+key)
+	cl := &http.Client{Timeout: 180 * time.Second}
+	res, err := cl.Do(hr)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	if res.StatusCode != http.StatusOK {
+		var e struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		msg := e.Error.Message
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", res.StatusCode)
+		}
+		return "", fmt.Errorf("openai: %s", msg)
+	}
+	var out struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &out) != nil {
+		return "", fmt.Errorf("openai: bad transcription response")
+	}
+	return out.Text, nil
 }
 
 // ── Google Gemini (images — "Nano Banana") ───────────────────────────────
