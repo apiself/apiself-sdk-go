@@ -477,6 +477,264 @@ func (bflImages) Generate(ctx context.Context, key string, req ImageRequest) ([]
 	}
 }
 
+// ── Video (async: submit → poll → download mp4) ──────────────────────────
+
+// VideoRequest is the capability-specific payload for text-to-video.
+type VideoRequest struct {
+	Model       string
+	Prompt      string
+	AspectRatio string // "16:9"
+	DurationSec int    // 5
+	Resolution  string // "720p"
+}
+
+// VideoAdapter is a CloudAdapter that can generate a video. Generation is
+// inherently asynchronous at every provider (a job that takes tens of seconds
+// to minutes); GenerateVideo blocks: it submits, polls until ready, downloads
+// the result and returns the raw video bytes + content type.
+type VideoAdapter interface {
+	CloudAdapter
+	GenerateVideo(ctx context.Context, key string, req VideoRequest) (video []byte, contentType string, err error)
+}
+
+func vAspect(req VideoRequest) string {
+	if req.AspectRatio != "" {
+		return req.AspectRatio
+	}
+	return "16:9"
+}
+func vDurationSec(req VideoRequest) int {
+	if req.DurationSec > 0 {
+		return req.DurationSec
+	}
+	return 5
+}
+
+// ── Luma Dream Machine (video — direct API) ──────────────────────────────
+
+func init() { RegisterCloudAdapter(lumaVideo{}) }
+
+type lumaVideo struct{}
+
+func (lumaVideo) ID() string         { return "luma" }
+func (lumaVideo) Capability() string { return "video" }
+
+func (lumaVideo) Models(_ context.Context, _ string) ([]CloudModel, error) {
+	return []CloudModel{
+		{ID: "ray-2", Label: "Ray 2"},
+		{ID: "ray-flash-2", Label: "Ray Flash 2"},
+		{ID: "ray-1-6", Label: "Ray 1.6"},
+	}, nil
+}
+
+func (lumaVideo) GenerateVideo(ctx context.Context, key string, req VideoRequest) ([]byte, string, error) {
+	if key == "" {
+		return nil, "", fmt.Errorf("luma: no API key configured")
+	}
+	model := req.Model
+	if model == "" {
+		model = "ray-2"
+	}
+	res := req.Resolution
+	if res == "" {
+		res = "720p"
+	}
+	body, _ := json.Marshal(map[string]any{
+		"prompt": req.Prompt, "model": model, "aspect_ratio": vAspect(req),
+		"resolution": res, "duration": fmt.Sprintf("%ds", vDurationSec(req)),
+	})
+	sr, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.lumalabs.ai/dream-machine/v1/generations", bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	sr.Header.Set("Content-Type", "application/json")
+	sr.Header.Set("Authorization", "Bearer "+key)
+	cl := &http.Client{Timeout: 30 * time.Second}
+	resp, err := cl.Do(sr)
+	if err != nil {
+		return nil, "", err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("luma: submit HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var sub struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	if json.Unmarshal(raw, &sub) != nil || sub.ID == "" {
+		return nil, "", fmt.Errorf("luma: no generation id in response")
+	}
+	// Poll GET generations/{id} until state=="completed".
+	pollURL := "https://api.lumalabs.ai/dream-machine/v1/generations/" + url.PathEscape(sub.ID)
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		pr, _ := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+		pr.Header.Set("Authorization", "Bearer "+key)
+		presp, err := cl.Do(pr)
+		if err != nil {
+			return nil, "", err
+		}
+		pbody, _ := io.ReadAll(io.LimitReader(presp.Body, 4<<20))
+		presp.Body.Close()
+		var pv struct {
+			State        string `json:"state"`
+			FailureReason string `json:"failure_reason"`
+			Assets       struct {
+				Video string `json:"video"`
+			} `json:"assets"`
+		}
+		_ = json.Unmarshal(pbody, &pv)
+		switch pv.State {
+		case "completed":
+			if pv.Assets.Video == "" {
+				return nil, "", fmt.Errorf("luma: completed but no video url")
+			}
+			vid, err := downloadBytes(ctx, pv.Assets.Video)
+			return vid, "video/mp4", err
+		case "failed":
+			reason := pv.FailureReason
+			if reason == "" {
+				reason = "failed"
+			}
+			return nil, "", fmt.Errorf("luma: %s", reason)
+		}
+		if time.Now().After(deadline) {
+			return nil, "", fmt.Errorf("luma: timed out waiting for video")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// ── Pika (video — via Fal.ai queue) ──────────────────────────────────────
+//
+// Pika has no public self-service API; per the product decision the Pika
+// provider is served through Fal.ai's uniform queue API. The provider key
+// configured for "pika" is therefore a Fal.ai key ("Authorization: Key …").
+
+func init() { RegisterCloudAdapter(pikaVideo{}) }
+
+type pikaVideo struct{}
+
+func (pikaVideo) ID() string         { return "pika" }
+func (pikaVideo) Capability() string { return "video" }
+
+func (pikaVideo) Models(_ context.Context, _ string) ([]CloudModel, error) {
+	return []CloudModel{
+		{ID: "pika-2.2", Label: "Pika 2.2"},
+		{ID: "pika-2.1", Label: "Pika 2.1"},
+	}, nil
+}
+
+func (pikaVideo) GenerateVideo(ctx context.Context, key string, req VideoRequest) ([]byte, string, error) {
+	if key == "" {
+		return nil, "", fmt.Errorf("pika: no Fal.ai API key configured")
+	}
+	// Map catalogue id -> Fal.ai model path.
+	falModel := "fal-ai/pika/v2.2/text-to-video"
+	if strings.Contains(req.Model, "2.1") {
+		falModel = "fal-ai/pika/v2.1/text-to-video"
+	}
+	res := req.Resolution
+	if res == "" {
+		res = "720p"
+	}
+	return falQueueVideo(ctx, key, falModel, map[string]any{
+		"prompt": req.Prompt, "aspect_ratio": vAspect(req),
+		"resolution": res, "duration": vDurationSec(req),
+	})
+}
+
+// falQueueVideo runs a Fal.ai queue job to completion and downloads the video.
+// Reusable for any Fal-hosted video model (Pika, and later Kling/Runway/Veo if
+// routed through Fal). Auth: "Authorization: Key <fal_key>".
+func falQueueVideo(ctx context.Context, key, falModel string, input map[string]any) ([]byte, string, error) {
+	body, _ := json.Marshal(map[string]any{"input": input})
+	sr, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://queue.fal.run/"+falModel, bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	sr.Header.Set("Content-Type", "application/json")
+	sr.Header.Set("Authorization", "Key "+key)
+	cl := &http.Client{Timeout: 30 * time.Second}
+	resp, err := cl.Do(sr)
+	if err != nil {
+		return nil, "", err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("fal: submit HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var sub struct {
+		RequestID   string `json:"request_id"`
+		StatusURL   string `json:"status_url"`
+		ResponseURL string `json:"response_url"`
+	}
+	if json.Unmarshal(raw, &sub) != nil || sub.RequestID == "" {
+		return nil, "", fmt.Errorf("fal: no request_id in response")
+	}
+	statusURL := sub.StatusURL
+	if statusURL == "" {
+		statusURL = "https://queue.fal.run/" + falModel + "/requests/" + url.PathEscape(sub.RequestID) + "/status"
+	}
+	respURL := sub.ResponseURL
+	if respURL == "" {
+		respURL = "https://queue.fal.run/" + falModel + "/requests/" + url.PathEscape(sub.RequestID)
+	}
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		pr, _ := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+		pr.Header.Set("Authorization", "Key "+key)
+		presp, err := cl.Do(pr)
+		if err != nil {
+			return nil, "", err
+		}
+		pbody, _ := io.ReadAll(io.LimitReader(presp.Body, 1<<20))
+		presp.Body.Close()
+		var st struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(pbody, &st)
+		if st.Status == "COMPLETED" {
+			break
+		}
+		if time.Now().After(deadline) {
+			return nil, "", fmt.Errorf("fal: timed out waiting for video")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+	// Fetch the result and pull the video URL.
+	rr, _ := http.NewRequestWithContext(ctx, http.MethodGet, respURL, nil)
+	rr.Header.Set("Authorization", "Key "+key)
+	rresp, err := cl.Do(rr)
+	if err != nil {
+		return nil, "", err
+	}
+	rbody, _ := io.ReadAll(io.LimitReader(rresp.Body, 4<<20))
+	rresp.Body.Close()
+	var out struct {
+		Video struct {
+			URL string `json:"url"`
+		} `json:"video"`
+	}
+	if json.Unmarshal(rbody, &out) != nil || out.Video.URL == "" {
+		return nil, "", fmt.Errorf("fal: no video url in result")
+	}
+	vid, err := downloadBytes(ctx, out.Video.URL)
+	return vid, "video/mp4", err
+}
+
 // downloadBytes fetches a URL and returns its body (used to pull the final
 // image/video off a provider's signed result URL).
 func downloadBytes(ctx context.Context, rawURL string) ([]byte, error) {
