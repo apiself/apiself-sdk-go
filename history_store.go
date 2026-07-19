@@ -20,6 +20,7 @@ package sdk
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -27,7 +28,10 @@ import (
 	"image/jpeg"
 	_ "image/png" // decode support for thumbnails
 	"math/rand"
+	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -68,6 +72,31 @@ type GenRecord struct {
 type HistoryRetention struct {
 	MaxAgeDays int `json:"maxAgeDays"`
 	MaxTotalMB int `json:"maxTotalMB"`
+}
+
+// StorageBoxID - the storage box (cross-box /api/cb/save target).
+const StorageBoxID = "apiself-box-storage"
+
+// HistoryConfig is the user-configurable output layout + storage push policy.
+// Zero values fall back to defaults (BoxDataDir outputs, month subdirs,
+// "gen_{ts}_{rand}" names, no auto-push).
+type HistoryConfig struct {
+	// OutputsRoot - absolute directory for rendered files. "" = default
+	// {BoxDataDir}/outputs.
+	OutputsRoot string `json:"outputsRoot"`
+	// SubdirPattern - how renders are grouped: "month" (YYYY-MM, default),
+	// "day" (YYYY-MM-DD) or "flat" (no subdirectory).
+	SubdirPattern string `json:"subdirPattern"`
+	// FilePattern - file name template without extension. Tokens:
+	// {yyyy} {mm} {dd} {hh} {mi} {ss} {ts} {rand}. Default "gen_{ts}_{rand}".
+	FilePattern string `json:"filePattern"`
+	// StorageAutoPush - when true every successful render is also pushed to
+	// the storage box (cross-box /api/cb/save) using StorageProfileID.
+	StorageAutoPush   bool   `json:"storageAutoPush"`
+	StorageProfileID  string `json:"storageProfileId"`
+	// StoragePathPrefix - destination folder inside the storage profile
+	// (e.g. "image-gen"). The render's file name is appended.
+	StoragePathPrefix string `json:"storagePathPrefix"`
 }
 
 // HistoryStore is the helper handle. Goroutine-safe via the underlying
@@ -163,6 +192,72 @@ func (s *HistoryStore) setSetting(key, value string) error {
 	return err
 }
 
+// Config returns the stored output/storage policy (defaults filled in).
+func (s *HistoryStore) Config() HistoryConfig {
+	var c HistoryConfig
+	if v := s.setting("config"); v != "" {
+		_ = json.Unmarshal([]byte(v), &c)
+	}
+	c.OutputsRoot = s.setting("outputs_root") // canonical key (SetOutputsRoot)
+	if c.SubdirPattern == "" {
+		c.SubdirPattern = "month"
+	}
+	if c.FilePattern == "" {
+		c.FilePattern = "gen_{ts}_{rand}"
+	}
+	return c
+}
+
+// SetConfig persists the policy. OutputsRoot goes through SetOutputsRoot so
+// the directory is created/validated and the live root switches immediately.
+func (s *HistoryStore) SetConfig(c HistoryConfig) error {
+	if err := s.SetOutputsRoot(c.OutputsRoot); err != nil {
+		return err
+	}
+	c.OutputsRoot = "" // stored separately under outputs_root
+	b, _ := json.Marshal(c)
+	return s.setSetting("config", string(b))
+}
+
+// renderName expands the FilePattern tokens for "now". The result is
+// sanitized to a safe file name (no path separators).
+func renderName(pattern string, now time.Time) string {
+	r := strings.NewReplacer(
+		"{yyyy}", now.Format("2006"),
+		"{mm}", now.Format("01"),
+		"{dd}", now.Format("02"),
+		"{hh}", now.Format("15"),
+		"{mi}", now.Format("04"),
+		"{ss}", now.Format("05"),
+		"{ts}", fmt.Sprintf("%d", now.Unix()),
+		"{rand}", fmt.Sprintf("%04d", rand.Intn(10000)),
+	)
+	name := r.Replace(pattern)
+	name = strings.Map(func(c rune) rune {
+		switch c {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
+			return '_'
+		}
+		return c
+	}, name)
+	if strings.TrimSpace(name) == "" {
+		name = fmt.Sprintf("gen_%d_%04d", now.Unix(), rand.Intn(10000))
+	}
+	return name
+}
+
+// subdirFor maps the SubdirPattern to the dated folder for "now".
+func subdirFor(pattern string, now time.Time) string {
+	switch pattern {
+	case "flat":
+		return ""
+	case "day":
+		return now.Format("2006-01-02")
+	default: // "month"
+		return now.Format("2006-01")
+	}
+}
+
 // SaveOutput writes the rendered bytes under the outputs root and returns
 // paths RELATIVE to it. thumb may be nil: for common image extensions a
 // thumbnail is generated automatically; for anything else (video) the
@@ -172,12 +267,22 @@ func (s *HistoryStore) SaveOutput(data []byte, ext string, thumb []byte) (relFil
 	if ext == "" {
 		return "", "", fmt.Errorf("HistoryStore.SaveOutput: ext required")
 	}
+	cfg := s.Config()
 	now := time.Now()
-	sub := now.Format("2006-01")
-	name := fmt.Sprintf("gen_%d_%04d", now.Unix(), rand.Intn(10000))
+	sub := subdirFor(cfg.SubdirPattern, now)
+	name := renderName(cfg.FilePattern, now)
 	dir := filepath.Join(s.root, sub)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", fmt.Errorf("HistoryStore.SaveOutput: mkdir: %w", err)
+	}
+	// Uniqueness: a pattern without {ts}/{rand} (e.g. "{yyyy}{mm}{dd}") would
+	// collide on the second render of the day - suffix until free.
+	base := name
+	for i := 0; ; i++ {
+		if _, err := os.Stat(filepath.Join(dir, name+"."+ext)); os.IsNotExist(err) {
+			break
+		}
+		name = fmt.Sprintf("%s_%03d", base, i+1)
 	}
 	relFile = filepath.ToSlash(filepath.Join(sub, name+"."+ext))
 	if err := os.WriteFile(filepath.Join(s.root, filepath.FromSlash(relFile)), data, 0o644); err != nil {
@@ -301,7 +406,65 @@ func (s *HistoryStore) Record(rec *GenRecord) (int64, error) {
 	rec.ID, _ = res.LastInsertId()
 	PublishEvent("history", map[string]any{"op": "add", "id": rec.ID, "kind": rec.Kind})
 	Audit("history.add", rec.Model, fmt.Sprintf("id=%d ok=%v", rec.ID, rec.OK))
+	// Auto-push to the storage box when the user enabled it (best-effort,
+	// async - a slow/offline storage box must never block a render).
+	if cfg := s.Config(); cfg.StorageAutoPush && rec.OK && rec.FilePath != "" {
+		id := rec.ID
+		go func() { _, _ = s.PushToStorage(id, "") }()
+	}
 	return rec.ID, nil
+}
+
+// PushToStorage sends a row's file to the storage box (cross-box
+// /api/cb/save) and records the resulting ref ("profileID:path") on the row.
+// profileID "" uses the configured default. Returns the ref.
+func (s *HistoryStore) PushToStorage(id int64, profileID string) (string, error) {
+	rec, err := s.Get(id)
+	if err != nil {
+		return "", err
+	}
+	if rec.FilePath == "" || rec.FileDeleted {
+		return "", fmt.Errorf("history: no file to push")
+	}
+	cfg := s.Config()
+	if profileID == "" {
+		profileID = cfg.StorageProfileID
+	}
+	if profileID == "" {
+		return "", fmt.Errorf("history: storage profile not configured")
+	}
+	abs, err := s.ResolveFile(rec.FilePath)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	dest := path.Base(filepath.ToSlash(rec.FilePath))
+	if p := strings.Trim(strings.TrimSpace(cfg.StoragePathPrefix), "/"); p != "" {
+		dest = p + "/" + dest
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	q := url.Values{"profile_id": {profileID}, "path": {dest}}
+	resp, err := CallBox(ctx, StorageBoxID, http.MethodPost, "/api/cb/save?"+q.Encode(), f, "application/octet-stream")
+	if err != nil {
+		return "", fmt.Errorf("history: storage push: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("history: storage push: HTTP %d", resp.StatusCode)
+	}
+	ref := profileID + ":" + dest
+	if err := s.SetStorageRef(id, ref); err != nil {
+		return ref, err
+	}
+	PublishEvent("history", map[string]any{"op": "storage", "id": id})
+	Audit("history.storage_push", dest, fmt.Sprintf("id=%d profile=%s", id, profileID))
+	return ref, nil
 }
 
 // SetStorageRef marks a row as also pushed to the storage box.

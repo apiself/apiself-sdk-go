@@ -36,6 +36,7 @@ func RegisterHistoryEndpoints(mux *http.ServeMux, store *HistoryStore) {
 	mux.HandleFunc("/api/history", h.list)
 	mux.HandleFunc("/api/history/stats", h.stats)
 	mux.HandleFunc("/api/history/retention", h.retention)
+	mux.HandleFunc("/api/history/settings", h.settings)
 	mux.HandleFunc("/api/history/file/", h.file)
 	mux.HandleFunc("/api/history/thumb/", h.thumb)
 	mux.HandleFunc("/api/history/", h.byID)
@@ -102,6 +103,28 @@ func (h *historyHandlers) retention(w http.ResponseWriter, r *http.Request) {
 		}
 		go h.s.RunRetention()
 		h.ok(w, pol)
+	default:
+		h.fail(w, http.StatusMethodNotAllowed, "history.method_not_allowed")
+	}
+}
+
+// settings - GET/POST /api/history/settings. Output layout (directory,
+// subdir + file name patterns) and storage-box push policy.
+func (h *historyHandlers) settings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.ok(w, h.s.Config())
+	case http.MethodPost:
+		var cfg HistoryConfig
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			h.fail(w, http.StatusBadRequest, "history.bad_request")
+			return
+		}
+		if err := h.s.SetConfig(cfg); err != nil {
+			h.fail(w, http.StatusBadRequest, "history.save_failed")
+			return
+		}
+		h.ok(w, h.s.Config())
 	default:
 		h.fail(w, http.StatusMethodNotAllowed, "history.method_not_allowed")
 	}
@@ -177,6 +200,17 @@ func (h *historyHandlers) byID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.ok(w, map[string]bool{"deleted": true})
+	case sub == "storage" && r.Method == http.MethodPost:
+		var body struct {
+			ProfileID string `json:"profileId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		ref, err := h.s.PushToStorage(id, body.ProfileID)
+		if err != nil {
+			h.fail(w, http.StatusBadGateway, "history.storage_failed")
+			return
+		}
+		h.ok(w, map[string]string{"storageRef": ref})
 	case sub == "favorite" && r.Method == http.MethodPost:
 		var body struct {
 			Favorite bool `json:"favorite"`
